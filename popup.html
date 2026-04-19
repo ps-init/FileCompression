@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>File Compressor</title>
+    <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <h1>📦 File Compressor</h1>
+        <p class="subtitle">Compress & decompress files in the browser</p>
+
+        <!-- Upload Section -->
+        <div class="section">
+            <h2>Step 1: Upload File</h2>
+            <div class="upload-area" id="uploadArea">
+                <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                    <polyline points="17 8 12 3 7 8"></polyline>
+                    <line x1="12" y1="3" x2="12" y2="15"></line>
+                </svg>
+                <p>Drag file here or click to upload</p>
+                <p class="file-types">Supported: .txt, .csv, .png, .jpg, .wav, .mp3, .mp4</p>
+                <input 
+                    type="file" 
+                    id="fileInput" 
+                    accept=".txt,.csv,.png,.jpg,.jpeg,.wav,.mp3,.mp4"
+                    style="display: none;"
+                >
+            </div>
+        </div>
+
+        <!-- File Info Section -->
+        <div class="section" id="fileInfoSection" style="display: none;">
+            <h2>File Information</h2>
+            <div class="info-box">
+                <p><strong>File Name:</strong> <span id="fileName">-</span></p>
+                <p><strong>File Type:</strong> <span id="fileType">-</span></p>
+                <p><strong>Original Size:</strong> <span id="originalSize">-</span></p>
+            </div>
+        </div>
+
+        <!-- Compression Metrics Section -->
+        <div class="section" id="metricsSection" style="display: none;">
+            <h2>Step 2: Compression Results</h2>
+            <div class="metrics-box">
+                <div class="metric">
+                    <label>Original Size</label>
+                    <p id="metricOriginal">0 bytes</p>
+                </div>
+                <div class="metric">
+                    <label>Compressed Size</label>
+                    <p id="metricCompressed">0 bytes</p>
+                </div>
+                <div class="metric">
+                    <label>Compression Ratio</label>
+                    <p id="metricRatio">0:1</p>
+                </div>
+                <div class="metric highlight">
+                    <label>Space Saved</label>
+                    <p id="metricSavings">0%</p>
+                </div>
+            </div>
+
+            <div class="button-group">
+                <button id="downloadCompressed" class="btn btn-primary">⬇️ Download Compressed</button>
+                <button id="reuploadBtn" class="btn btn-secondary">🔄 Upload Compressed File</button>
+            </div>
+        </div>
+
+        <!-- Re-upload (Decompression) Section -->
+        <div class="section" id="decompressSection" style="display: none;">
+            <h2>Step 3: Verify Decompression</h2>
+            <p class="instruction-text">Upload the compressed file to verify it decompresses correctly.</p>
+            <div class="upload-area-small" id="reuploadArea">
+                <p>Click to re-upload compressed file</p>
+                <input 
+                    type="file" 
+                    id="reuploadInput"
+                    style="display: none;"
+                >
+            </div>
+        </div>
+
+        <!-- Verification Results Section -->
+        <div class="section" id="verificationSection" style="display: none;">
+            <h2>Verification Results</h2>
+            <div class="results-box" id="resultsBox">
+                <!-- Results will be inserted here -->
+            </div>
+        </div>
+
+        <!-- Error Message -->
+        <div class="error-message" id="errorMessage" style="display: none;"></div>
+
+        <!-- Loading Spinner -->
+        <div class="loading-spinner" id="loadingSpinner" style="display: none;">
+            <div class="spinner"></div>
+            <p>Processing file...</p>
+        </div>
+
+        <!-- Footer -->
+        <div class="footer">
+            <p>💡 Tip: Compression works best with text files and certain image types.</p>
+        </div>
+    </div>
+
+    <!-- Load libraries first -->
+    <script src="lib/pako.min.js"></script>
+    <script src="lib/UPNG.js"></script>
+    <script src="lib/jpeg.js"></script>
+    <script src="lib/lame.min.js"></script>
+
+    <!-- Load your code last -->
+    <script src="popup.js"></script>
+</body>
+</html>
