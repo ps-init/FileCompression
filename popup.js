@@ -457,6 +457,15 @@ document.addEventListener("DOMContentLoaded", () => {
             const file = compressInput.files[0];
             if (!file) return;
 
+            // ── Reset all result sections for new file ──────────────
+            const metricsSection      = document.getElementById("metricsSection");
+            const decompressSection   = document.getElementById("decompressSection");
+            const verificationSection = document.getElementById("verificationSection");
+            if (metricsSection)      metricsSection.style.display      = "none";
+            if (decompressSection)   decompressSection.style.display   = "none";
+            if (verificationSection) verificationSection.style.display = "none";
+            compressionSession = null;
+
             const infoSection = document.getElementById("fileInfoSection");
             if (infoSection) infoSection.style.display = "block";
 
