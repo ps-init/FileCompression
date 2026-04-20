@@ -5,37 +5,41 @@
  * for the MACS JC Project 2 Chrome Extension via ffmpeg.wasm.
  *
  * Library used:
- *   - ffmpeg.wasm v0.11 (loaded from CDN in HTML, no manual download needed)
- *     Uses the single-threaded core (@ffmpeg/core-st) which works without
- *     SharedArrayBuffer, so no special HTTP headers are required.
+ *   - ffmpeg.wasm v0.11.0 — loaded locally from lib/ folder.
+ *     Uses @ffmpeg/core@0.11.0 (NOT core-st — that package does not exist).
+ *     Single-threaded by default so no SharedArrayBuffer headers needed.
  *
  * Quality metric: bitrate comparison (kbps before vs after).
- * Frame-by-frame PSNR/SSIM for video would require decoding every frame
- * in the browser, which is impractical. Bitrate comparison is explicitly
- * permitted by PDF Section 6.3.
+ * Frame-by-frame PSNR/SSIM is impractical for video in-browser.
+ * Bitrate comparison is explicitly permitted by PDF Section 6.3.
  *
  * Hash note: CRF-0 re-encoding does NOT produce byte-identical output to the
- * original (container metadata differs). The SHA-256 stored is of the compressed
- * file itself — re-uploading that exact file confirms it hasn't been altered.
+ * original (container metadata differs). SHA-256 is stored of the compressed
+ * file — re-uploading it confirms the file hasn't been altered.
  *
- * Required script in HTML before this file:
- *   <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js"></script>
+ * Required in HTML before this file:
+ *   <script src="lib/ffmpeg.min.js"></script>
  */
 
+"use strict";
 
 /* ─────────────────────────────────────────────────────────────────────────────
    SECTION 1 — FFMPEG INSTANCE MANAGEMENT
    ───────────────────────────────────────────────────────────────────────────── */
 
-/** Shared ffmpeg.wasm instance — only loaded once to avoid re-downloading the core. */
+/** Shared ffmpeg.wasm instance — loaded once, reused for all operations. */
 let ffmpegInstance = null;
 
 /**
- * Returns an initialised ffmpeg.wasm instance, loading it if not yet ready.
- * Safe to call multiple times — skips loading if already done.
+ * Returns an initialised ffmpeg.wasm instance.
+ * Loads it on first call; subsequent calls return the cached instance.
  *
- * @param {Function|null} onLog      - Optional callback receiving ffmpeg log strings
- * @param {Function|null} onProgress - Optional callback receiving progress ratio (0–1)
+ * FIX: corePath now uses @ffmpeg/core@0.11.0 (not core-st which doesn't exist).
+ * FIX: Uses window.location.origin so it works both on localhost and
+ *      chrome-extension:// without hardcoded paths.
+ *
+ * @param {Function|null} onLog      - Optional callback for ffmpeg log lines
+ * @param {Function|null} onProgress - Optional callback for progress (0–1)
  * @returns {Promise<Object>} Loaded ffmpeg instance
  */
 async function getFFmpegInstance(onLog = null, onProgress = null) {
@@ -43,13 +47,14 @@ async function getFFmpegInstance(onLog = null, onProgress = null) {
 
     if (typeof FFmpeg === "undefined" || typeof FFmpeg.createFFmpeg === "undefined") {
         throw new Error(
-            "ffmpeg.wasm is not loaded. Add this script tag before videoCompression.js:\n" +
-            '<script src="https://unpkg.com/@ffmpeg/ffmpeg@0.11.6/dist/ffmpeg.min.js"></script>'
+            "ffmpeg.wasm is not loaded. Add <script src='lib/ffmpeg.min.js'> before videocompression.js."
         );
     }
 
     ffmpegInstance = FFmpeg.createFFmpeg({
-        corePath: "https://unpkg.com/@ffmpeg/core-st@0.11.0/dist/ffmpeg-core.js",
+        // FIX 1: correct package name — @ffmpeg/core (not @ffmpeg/core-st)
+        // FIX 2: load from local lib/ folder so it works offline and in extension
+        corePath: window.location.origin + "/lib/ffmpeg-core.js",
         log:      true,
         logger:   ({ message }) => { if (onLog) onLog(message); },
         progress: ({ ratio })   => { if (onProgress) onProgress(Math.min(ratio, 1)); },
@@ -65,34 +70,33 @@ async function getFFmpegInstance(onLog = null, onProgress = null) {
    ───────────────────────────────────────────────────────────────────────────── */
 
 /**
- * Reads duration, width, and height from a video file using the HTML5 video element.
- * Used for bitrate calculation and lossless rebuild verification.
+ * Reads duration, width, and height from a video file via the HTML5 video element.
  *
- * @param {File|Blob} videoFile - A video file or blob
+ * @param {File|Blob} videoFile
  * @returns {Promise<{duration: number, width: number, height: number}>}
  */
 function getVideoMetadata(videoFile) {
     return new Promise((resolve, reject) => {
-        const videoElement     = document.createElement("video");
-        videoElement.preload   = "metadata";
-        videoElement.muted     = true;
-        const objectURL        = URL.createObjectURL(videoFile);
+        const video    = document.createElement("video");
+        video.preload  = "metadata";
+        video.muted    = true;
+        const url      = URL.createObjectURL(videoFile);
 
-        videoElement.onloadedmetadata = () => {
-            URL.revokeObjectURL(objectURL);
+        video.onloadedmetadata = () => {
+            URL.revokeObjectURL(url);
             resolve({
-                duration: videoElement.duration,
-                width:    videoElement.videoWidth,
-                height:   videoElement.videoHeight,
+                duration: video.duration,
+                width:    video.videoWidth,
+                height:   video.videoHeight,
             });
         };
 
-        videoElement.onerror = () => {
-            URL.revokeObjectURL(objectURL);
+        video.onerror = () => {
+            URL.revokeObjectURL(url);
             reject(new Error("Could not read video metadata. File may be unsupported or corrupted."));
         };
 
-        videoElement.src = objectURL;
+        video.src = url;
     });
 }
 
@@ -102,10 +106,9 @@ function getVideoMetadata(videoFile) {
    ───────────────────────────────────────────────────────────────────────────── */
 
 /**
- * Computes compression ratio (PDF Section 6.1).
- *
- * @param {number} originalSize   - Original size in bytes
- * @param {number} compressedSize - Compressed size in bytes
+ * Compression ratio: originalSize / compressedSize  (PDF 6.1)
+ * @param {number} originalSize
+ * @param {number} compressedSize
  * @returns {string} e.g. "3.24:1"
  */
 function computeCompressionRatio(originalSize, compressedSize) {
@@ -114,10 +117,9 @@ function computeCompressionRatio(originalSize, compressedSize) {
 }
 
 /**
- * Computes space savings percentage (PDF Section 6.2).
- *
- * @param {number} originalSize   - Original size in bytes
- * @param {number} compressedSize - Compressed size in bytes
+ * Space savings percentage  (PDF 6.2)
+ * @param {number} originalSize
+ * @param {number} compressedSize
  * @returns {string} e.g. "69.14%"
  */
 function computeSpaceSavings(originalSize, compressedSize) {
@@ -125,67 +127,58 @@ function computeSpaceSavings(originalSize, compressedSize) {
 }
 
 /**
- * Computes video bitrate in kbps.
- * Used as the quality metric for video per PDF Section 6.3:
- * "PSNR, SSIM, or a bit-rate comparison".
- *
+ * Video bitrate in kbps — used as quality metric (PDF 6.3)
  * Formula: (fileSizeBytes × 8) / (durationSeconds × 1000)
  *
- * @param {number} fileSizeBytes   - File size in bytes
- * @param {number} durationSeconds - Video duration in seconds
+ * @param {number} fileSizeBytes
+ * @param {number} durationSeconds
  * @returns {string} e.g. "2048 kbps"
  */
 function computeBitrate(fileSizeBytes, durationSeconds) {
     if (!durationSeconds || durationSeconds <= 0) return "N/A";
-    const kbps = (fileSizeBytes * 8) / (durationSeconds * 1000);
-    return kbps.toFixed(0) + " kbps";
+    return ((fileSizeBytes * 8) / (durationSeconds * 1000)).toFixed(0) + " kbps";
 }
 
 /**
- * Computes SHA-256 hash of an ArrayBuffer using the built-in SubtleCrypto API.
- * No external library required (PDF Section 6.4).
- *
- * @param {ArrayBuffer} buffer - Raw bytes to hash
- * @returns {Promise<string>} Lowercase hex-encoded SHA-256 string
+ * SHA-256 hash via SubtleCrypto — no external library needed  (PDF 6.4)
+ * @param {ArrayBuffer} buffer
+ * @returns {Promise<string>} hex string
  */
 async function computeSHA256(buffer) {
     const hashBuffer = await crypto.subtle.digest("SHA-256", buffer);
-    const hashBytes  = Array.from(new Uint8Array(hashBuffer));
-    return hashBytes.map((byte) => byte.toString(16).padStart(2, "0")).join("");
+    return Array.from(new Uint8Array(hashBuffer))
+                .map((b) => b.toString(16).padStart(2, "0"))
+                .join("");
 }
 
 /**
- * Formats a byte count to a human-readable string.
- *
- * @param {number} bytes - Size in bytes
- * @returns {string} e.g. "14.32 MB"
+ * Human-readable file size.
+ * @param {number} bytes
+ * @returns {string}
  */
 function formatBytes(bytes) {
-    if (bytes < 1024)                return bytes + " B";
-    if (bytes < 1024 * 1024)         return (bytes / 1024).toFixed(2) + " KB";
-    if (bytes < 1024 * 1024 * 1024)  return (bytes / (1024 * 1024)).toFixed(2) + " MB";
-    return (bytes / (1024 * 1024 * 1024)).toFixed(2) + " GB";
+    if (bytes < 1024)       return bytes + " B";
+    if (bytes < 1048576)    return (bytes / 1024).toFixed(2) + " KB";
+    if (bytes < 1073741824) return (bytes / 1048576).toFixed(2) + " MB";
+    return (bytes / 1073741824).toFixed(2) + " GB";
 }
 
 /**
- * Formats a duration in seconds to a readable string.
- *
- * @param {number} totalSeconds - Duration in seconds
- * @returns {string} e.g. "2m 14s" or "38s"
+ * Human-readable duration.
+ * @param {number} totalSeconds
+ * @returns {string} e.g. "2m 14s"
  */
 function formatDuration(totalSeconds) {
     if (!isFinite(totalSeconds)) return "Unknown";
-    const minutes = Math.floor(totalSeconds / 60);
-    const seconds = Math.floor(totalSeconds % 60);
-    return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
+    const m = Math.floor(totalSeconds / 60);
+    const s = Math.floor(totalSeconds % 60);
+    return m > 0 ? `${m}m ${s}s` : `${s}s`;
 }
 
 /**
- * Extracts the lowercase file extension including the dot from a filename.
- * Falls back to ".mp4" if no extension is found.
- *
- * @param {string} filename - e.g. "clip.mov"
- * @returns {string} e.g. ".mov"
+ * Lowercase file extension from filename, fallback ".mp4"
+ * @param {string} filename
+ * @returns {string}
  */
 function getFileExtension(filename) {
     const match = filename.match(/\.[^.]+$/);
@@ -194,60 +187,54 @@ function getFileExtension(filename) {
 
 
 /* ─────────────────────────────────────────────────────────────────────────────
-   SECTION 4 — LOSSY COMPRESSION: H.264 with configurable CRF
+   SECTION 4 — LOSSY COMPRESSION: H.264 CRF > 0
    ───────────────────────────────────────────────────────────────────────────── */
 
 /**
- * Compresses a video using H.264 lossy encoding at a given CRF level.
- * Output is always an MP4 file with H.264 video and AAC audio.
+ * Compresses a video using H.264 lossy encoding at a configurable CRF.
+ * Output is always MP4 with H.264 video and AAC audio.
  *
- * CRF (Constant Rate Factor) controls the quality vs file size trade-off:
- *   0   = lossless (use compressVideoLossless instead)
- *   18  = visually lossless — barely distinguishable from original
- *   23  = ffmpeg default — good balance
- *   28  = noticeable compression, significantly smaller
- *   51  = worst quality
+ * CRF guide:
+ *   0 = lossless  |  18 = visually lossless  |  23 = default balance
+ *   28 = noticeable  |  51 = worst quality
  *
- * Preset controls encoding speed vs compression efficiency:
- *   ultrafast → veryslow (faster = larger file; slower = smaller file)
- *   "medium" is the best balance for this project.
- *
- * @param {File} videoFile        - Input video (MP4, WebM, MOV, AVI, MKV)
- * @param {number} crf            - Quality level 0–51. Default: 23
- * @param {string} preset         - Encoding preset. Default: "medium"
- * @param {Function|null} onLog   - Optional log callback
- * @param {Function|null} onProgress - Optional progress callback (0–1)
- * @returns {Promise<Object>} Compression result with metrics and compressed blob
+ * @param {File}         videoFile
+ * @param {number}       crf       - 0–51, default 23
+ * @param {string}       preset    - ffmpeg preset, default "medium"
+ * @param {Function|null} onLog
+ * @param {Function|null} onProgress
+ * @returns {Promise<Object>}
  */
 async function compressVideoLossy(videoFile, crf = 23, preset = "medium", onLog = null, onProgress = null) {
     crf = Math.max(0, Math.min(51, Math.round(crf)));
-
-    const validPresets = ["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"];
+    const validPresets = ["ultrafast","superfast","veryfast","faster","fast","medium","slow","slower","veryslow"];
     if (!validPresets.includes(preset)) preset = "medium";
 
     const originalSize     = videoFile.size;
     const originalMetadata = await getVideoMetadata(videoFile);
 
-    const ffmpeg    = await getFFmpegInstance(onLog, onProgress);
-    const inputName = "input_lossy" + getFileExtension(videoFile.name);
+    const ffmpeg     = await getFFmpegInstance(onLog, onProgress);
+    const inputName  = "input_lossy" + getFileExtension(videoFile.name);
     const outputName = "output_lossy.mp4";
 
-    ffmpeg.FS("writeFile", inputName, await FFmpeg.fetchFile(videoFile));
+    // FIX: fetchFile is a method on the ffmpeg INSTANCE at v0.11.0,
+    //      not FFmpeg.fetchFile (that was a static import style, not available here)
+    ffmpeg.FS("writeFile", inputName, await ffmpeg.fetchFile(videoFile));
 
     await ffmpeg.run(
-        "-i",        inputName,
-        "-c:v",      "libx264",
-        "-crf",      String(crf),
-        "-preset",   preset,
-        "-c:a",      "aac",
-        "-b:a",      "128k",
+        "-i",      inputName,
+        "-c:v",    "libx264",
+        "-crf",    String(crf),
+        "-preset", preset,
+        "-c:a",    "aac",
+        "-b:a",    "128k",
         outputName
     );
 
-    const outputData      = ffmpeg.FS("readFile", outputName);
-    const compressedBlob  = new Blob([outputData.buffer], { type: "video/mp4" });
-    const compressedSize  = compressedBlob.size;
-    const compressedMeta  = await getVideoMetadata(compressedBlob);
+    const outputData     = ffmpeg.FS("readFile", outputName);
+    const compressedBlob = new Blob([outputData.buffer], { type: "video/mp4" });
+    const compressedSize = compressedBlob.size;
+    const compressedMeta = await getVideoMetadata(compressedBlob);
 
     ffmpeg.FS("unlink", inputName);
     ffmpeg.FS("unlink", outputName);
@@ -283,18 +270,14 @@ async function compressVideoLossy(videoFile, crf = 23, preset = "medium", onLog 
  * Compresses a video using H.264 lossless encoding (CRF 0).
  * Every pixel value is mathematically preserved.
  *
- * IMPORTANT — hash behaviour:
- * Re-encoding at CRF 0 does NOT produce byte-identical output to the original
- * because container metadata and encoder headers will differ. This is expected.
- * The SHA-256 stored here is of the compressed output file. Re-uploading that
- * exact file will match this hash, confirming it hasn't been corrupted.
+ * Note: CRF-0 re-encoding does NOT produce byte-identical output to the
+ * original (container metadata differs). SHA-256 is of the compressed output.
+ * Re-uploading that file will match the hash, proving no corruption.
  *
- * Integrity is also verified by checking that duration and dimensions are unchanged.
- *
- * @param {File} videoFile           - Input video
- * @param {Function|null} onLog      - Optional log callback
- * @param {Function|null} onProgress - Optional progress callback (0–1)
- * @returns {Promise<Object>} Compression result with hash and integrity status
+ * @param {File}         videoFile
+ * @param {Function|null} onLog
+ * @param {Function|null} onProgress
+ * @returns {Promise<Object>}
  */
 async function compressVideoLossless(videoFile, onLog = null, onProgress = null) {
     const originalSize     = videoFile.size;
@@ -304,7 +287,8 @@ async function compressVideoLossless(videoFile, onLog = null, onProgress = null)
     const inputName  = "input_lossless" + getFileExtension(videoFile.name);
     const outputName = "output_lossless.mp4";
 
-    ffmpeg.FS("writeFile", inputName, await FFmpeg.fetchFile(videoFile));
+    // FIX: fetchFile on instance, not FFmpeg.fetchFile
+    ffmpeg.FS("writeFile", inputName, await ffmpeg.fetchFile(videoFile));
 
     await ffmpeg.run(
         "-i",       inputName,
@@ -324,10 +308,9 @@ async function compressVideoLossless(videoFile, onLog = null, onProgress = null)
     ffmpeg.FS("unlink", inputName);
     ffmpeg.FS("unlink", outputName);
 
-    const compressedHash = await computeSHA256(outputData.buffer);
-
+    const compressedHash    = await computeSHA256(outputData.buffer);
     const durationMatches   = Math.abs(originalMetadata.duration - compressedMeta.duration) < 0.1;
-    const dimensionsMatch   = originalMetadata.width === compressedMeta.width &&
+    const dimensionsMatch   = originalMetadata.width  === compressedMeta.width &&
                               originalMetadata.height === compressedMeta.height;
     const integrityVerified = durationMatches && dimensionsMatch;
 
@@ -362,56 +345,47 @@ async function compressVideoLossless(videoFile, onLog = null, onProgress = null)
    ───────────────────────────────────────────────────────────────────────────── */
 
 /**
- * Verifies a lossless video rebuild by comparing the SHA-256 of the
- * re-uploaded file against the hash stored at compression time.
- *
- * @param {File} reuploadedFile - The compressed video uploaded back by the user
- * @param {string} storedHash   - Hash from compressVideoLossless()
- * @returns {Promise<Object>} Verification result
+ * Verifies a lossless video rebuild via SHA-256 hash comparison.
+ * @param {File}   reuploadedFile
+ * @param {string} storedHash
+ * @returns {Promise<Object>}
  */
 async function verifyLosslessVideoRebuild(reuploadedFile, storedHash) {
     const fileBuffer  = await reuploadedFile.arrayBuffer();
     const rebuiltHash = await computeSHA256(fileBuffer);
     const isMatch     = rebuiltHash === storedHash;
-
     return {
         storedHash,
         rebuiltHash,
         isMatch,
-        status: isMatch
-            ? "✅ Hash match — compressed file is intact"
-            : "❌ Hash mismatch — file may have been altered",
+        status:       isMatch ? "✅ Hash match — file is intact" : "❌ Hash mismatch — file may be altered",
         downloadBlob: new Blob([fileBuffer], { type: "video/mp4" }),
     };
 }
 
 /**
- * Verifies a lossy video rebuild by computing bitrate before and after,
- * showing the bitrate reduction as the quality trade-off indicator.
- *
- * @param {File} reuploadedFile        - The compressed video uploaded back
- * @param {number} originalSize        - Original file size in bytes
- * @param {number} originalDurationSec - Original duration in seconds
- * @returns {Promise<Object>} Bitrate comparison result
+ * Verifies a lossy video rebuild via bitrate comparison.
+ * @param {File}   reuploadedFile
+ * @param {number} originalSize
+ * @param {number} originalDurationSec
+ * @returns {Promise<Object>}
  */
 async function verifyLossyVideoRebuild(reuploadedFile, originalSize, originalDurationSec) {
-    const rebuiltMetadata  = await getVideoMetadata(reuploadedFile);
-    const rebuiltSize      = reuploadedFile.size;
-
-    const originalBitrateKbps = (originalSize * 8) / (originalDurationSec * 1000);
-    const rebuiltBitrateKbps  = (rebuiltSize  * 8) / (rebuiltMetadata.duration * 1000);
-    const bitrateReduction    = (((originalBitrateKbps - rebuiltBitrateKbps) / originalBitrateKbps) * 100).toFixed(2) + "%";
-
+    const rebuiltMeta          = await getVideoMetadata(reuploadedFile);
+    const rebuiltSize          = reuploadedFile.size;
+    const originalBitrateKbps  = (originalSize  * 8) / (originalDurationSec       * 1000);
+    const rebuiltBitrateKbps   = (rebuiltSize   * 8) / (rebuiltMeta.duration      * 1000);
+    const bitrateReduction     = (((originalBitrateKbps - rebuiltBitrateKbps) / originalBitrateKbps) * 100).toFixed(2) + "%";
     return {
         originalSizeHR:    formatBytes(originalSize),
         rebuiltSizeHR:     formatBytes(rebuiltSize),
         ratio:             computeCompressionRatio(originalSize, rebuiltSize),
         savings:           computeSpaceSavings(originalSize, rebuiltSize),
         originalBitrate:   originalBitrateKbps.toFixed(0) + " kbps",
-        rebuiltBitrate:    rebuiltBitrateKbps.toFixed(0) + " kbps",
+        rebuiltBitrate:    rebuiltBitrateKbps.toFixed(0)  + " kbps",
         bitrateReduction,
-        rebuiltDuration:   formatDuration(rebuiltMetadata.duration),
-        rebuiltDimensions: `${rebuiltMetadata.width} × ${rebuiltMetadata.height} px`,
+        rebuiltDuration:   formatDuration(rebuiltMeta.duration),
+        rebuiltDimensions: `${rebuiltMeta.width} × ${rebuiltMeta.height} px`,
         downloadBlob:      reuploadedFile,
     };
 }
@@ -422,19 +396,17 @@ async function verifyLossyVideoRebuild(reuploadedFile, originalSize, originalDur
    ───────────────────────────────────────────────────────────────────────────── */
 
 /**
- * Triggers a browser download for a given Blob.
- *
- * @param {Blob} blob       - File data to download
- * @param {string} filename - Filename shown in the save dialog
- * @returns {void}
+ * Triggers a browser file download for a Blob.
+ * @param {Blob}   blob
+ * @param {string} filename
  */
 function downloadBlob(blob, filename) {
-    const objectURL = URL.createObjectURL(blob);
-    const anchor    = document.createElement("a");
-    anchor.href     = objectURL;
+    const url    = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href     = url;
     anchor.download = filename;
     document.body.appendChild(anchor);
     anchor.click();
     document.body.removeChild(anchor);
-    setTimeout(() => URL.revokeObjectURL(objectURL), 1000);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
