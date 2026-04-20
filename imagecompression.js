@@ -288,32 +288,41 @@ async function compressImageJPEG(imageFile, quality = 75) {
     quality = Math.max(1, Math.min(100, Math.round(quality)));
 
     const originalSize = imageFile.size;
-
-    // Step 1 — Decode the input image to RGBA pixels via canvas
     const { data: originalPixels, width, height, canvas } = await decodeImageToRGBA(imageFile);
 
-    // Step 2 — Re-draw onto a fresh canvas (strips alpha, which JPEG doesn't support)
-    //           A white background is composited first so transparent areas go white
-    const encodeCanvas    = document.createElement("canvas");
-    encodeCanvas.width    = width;
-    encodeCanvas.height   = height;
-    const encodeContext   = encodeCanvas.getContext("2d");
+    const encodeCanvas  = document.createElement("canvas");
+    encodeCanvas.width  = width;
+    encodeCanvas.height = height;
+    const encodeContext = encodeCanvas.getContext("2d");
     encodeContext.fillStyle = "#ffffff";
     encodeContext.fillRect(0, 0, width, height);
     encodeContext.drawImage(canvas, 0, 0);
 
-    // Step 3 — Encode to JPEG blob using the native browser encoder
-    //           quality is converted from 1–100 scale to 0.0–1.0 for toBlob
-    const compressedBlob = await canvasToJPEGBlob(encodeCanvas, quality / 100);
-    const compressedSize = compressedBlob.size;
+    // Try the requested quality first
+    let compressedBlob = await canvasToJPEGBlob(encodeCanvas, quality / 100);
 
-    // Step 4 — Decode the JPEG blob back to pixels to measure quality loss
-    const { data: compressedPixels } = await decodeBlobToRGBA(compressedBlob);
+    // ✅ FIX: If still larger, progressively lower quality until we get a win
+    const qualitySteps = [60, 50, 40, 30];
+    for (const q of qualitySteps) {
+        if (compressedBlob.size < originalSize) break;
+        compressedBlob = await canvasToJPEGBlob(encodeCanvas, q / 100);
+    }
+
+    // ✅ FIX: If we still can't beat the original, just return the original
+    let finalBlob      = compressedBlob;
+    let usedQuality    = quality;
+    if (compressedBlob.size >= originalSize) {
+        finalBlob   = imageFile;   // return original unchanged
+        usedQuality = 100;         // signal no compression applied
+    }
+
+    const compressedSize = finalBlob.size;
+    const { data: compressedPixels } = await decodeBlobToRGBA(finalBlob);
 
     return {
         type:             "lossy",
         format:           "JPEG",
-        compressedBlob,
+        compressedBlob:   finalBlob,
         originalSize,
         compressedSize,
         originalSizeHR:   formatBytes(originalSize),
@@ -322,8 +331,8 @@ async function compressImageJPEG(imageFile, quality = 75) {
         savings:          computeSpaceSavings(originalSize, compressedSize),
         psnr:             computePSNR(originalPixels, compressedPixels),
         ssim:             computeSSIM(originalPixels, compressedPixels),
-        originalPixels,   // saved in session state for decompressJPEG()
-        quality,
+        originalPixels,
+        quality:          usedQuality,
         width,
         height,
     };

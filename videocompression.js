@@ -49,7 +49,7 @@ async function getFFmpegInstance(onLog = null, onProgress = null) {
     }
 
     ffmpegInstance = FFmpeg.createFFmpeg({
-        corePath: "https://unpkg.com/@ffmpeg/core-st@0.11.1/dist/ffmpeg-core.js",
+        corePath: "https://unpkg.com/@ffmpeg/core-st@0.11.0/dist/ffmpeg-core.js",
         log:      true,
         logger:   ({ message }) => { if (onLog) onLog(message); },
         progress: ({ ratio })   => { if (onProgress) onProgress(Math.min(ratio, 1)); },

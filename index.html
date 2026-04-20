@@ -107,13 +107,21 @@
         </div>
     </div>
 
-    <!-- Load libraries first -->
+    <!-- Libraries -->
     <script src="lib/pako.min.js"></script>
-    <script src="lib/UPNG.js"></script>
     <script src="lib/jpeg.js"></script>
     <script src="lib/lame.min.js"></script>
+    <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.11.0/dist/ffmpeg.min.js"></script>
 
-    <!-- Load your code last -->
+    <!-- Compression / decompression modules -->
+    <script src="textcompression.js"></script>
+     <script src="lib/upng.js"></script>
+    <script src="imagecompression.js"></script>
+    <script src="imagedecompression.js"></script>
+    <script src="videocompression.js"></script>
+    <script src="videodecompression.js"></script>
+
+    <!-- UI logic — must load last -->
     <script src="popup.js"></script>
 </body>
 </html>
