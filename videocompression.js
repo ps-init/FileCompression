@@ -51,16 +51,27 @@ async function getFFmpegInstance(onLog = null, onProgress = null) {
         );
     }
 
+    // FIX: use CDN directly — avoids all local file issues (corrupt wasm, wrong build, path problems)
+    // @ffmpeg/core-st = single-threaded build, no SharedArrayBuffer needed
+    const corePath = "https://unpkg.com/@ffmpeg/core-st@0.11.0/dist/ffmpeg-core.js";
+
     ffmpegInstance = FFmpeg.createFFmpeg({
-        // FIX 1: correct package name — @ffmpeg/core (not @ffmpeg/core-st)
-        // FIX 2: load from local lib/ folder so it works offline and in extension
-        corePath: window.location.origin + "/lib/ffmpeg-core.js",
+        corePath,
         log:      true,
         logger:   ({ message }) => { if (onLog) onLog(message); },
         progress: ({ ratio })   => { if (onProgress) onProgress(Math.min(ratio, 1)); },
     });
 
-    await ffmpegInstance.load();
+    // FIX: wrap load() in 30s timeout — missing core files cause infinite hang
+    await Promise.race([
+        ffmpegInstance.load(),
+        new Promise((_, reject) =>
+            setTimeout(() => reject(new Error(
+                "ffmpeg failed to load in 30s. Check lib/ffmpeg-core.js and lib/ffmpeg-core.wasm exist. Path tried: " + corePath
+            )), 30000)
+        ),
+    ]);
+
     return ffmpegInstance;
 }
 
@@ -205,10 +216,10 @@ function getFileExtension(filename) {
  * @param {Function|null} onProgress
  * @returns {Promise<Object>}
  */
-async function compressVideoLossy(videoFile, crf = 23, preset = "medium", onLog = null, onProgress = null) {
+async function compressVideoLossy(videoFile, crf = 23, preset = "ultrafast", onLog = null, onProgress = null) {
     crf = Math.max(0, Math.min(51, Math.round(crf)));
     const validPresets = ["ultrafast","superfast","veryfast","faster","fast","medium","slow","slower","veryslow"];
-    if (!validPresets.includes(preset)) preset = "medium";
+    if (!validPresets.includes(preset)) preset = "ultrafast";
 
     const originalSize     = videoFile.size;
     const originalMetadata = await getVideoMetadata(videoFile);
@@ -221,15 +232,23 @@ async function compressVideoLossy(videoFile, crf = 23, preset = "medium", onLog 
     //      not FFmpeg.fetchFile (that was a static import style, not available here)
     ffmpeg.FS("writeFile", inputName, await ffmpeg.fetchFile(videoFile));
 
-    await ffmpeg.run(
-        "-i",      inputName,
-        "-c:v",    "libx264",
-        "-crf",    String(crf),
-        "-preset", preset,
-        "-c:a",    "aac",
-        "-b:a",    "128k",
-        outputName
-    );
+    // FIX: wrap run() in timeout — large files can hang indefinitely
+    await Promise.race([
+        ffmpeg.run(
+            "-i",      inputName,
+            "-c:v",    "libx264",
+            "-crf",    String(crf),
+            "-preset", preset,
+            "-c:a",    "aac",
+            "-b:a",    "128k",
+            outputName
+        ),
+        new Promise((_, reject) =>
+            setTimeout(() => reject(new Error(
+                "Video encoding timed out after 5 minutes. Try a smaller file or higher CRF value."
+            )), 300000)
+        ),
+    ]);
 
     const outputData     = ffmpeg.FS("readFile", outputName);
     const compressedBlob = new Blob([outputData.buffer], { type: "video/mp4" });
@@ -290,15 +309,23 @@ async function compressVideoLossless(videoFile, onLog = null, onProgress = null)
     // FIX: fetchFile on instance, not FFmpeg.fetchFile
     ffmpeg.FS("writeFile", inputName, await ffmpeg.fetchFile(videoFile));
 
-    await ffmpeg.run(
-        "-i",       inputName,
-        "-c:v",     "libx264",
-        "-crf",     "0",
-        "-preset",  "ultrafast",
-        "-c:a",     "copy",
-        "-pix_fmt", "yuv420p",
-        outputName
-    );
+    // FIX: wrap run() in timeout
+    await Promise.race([
+        ffmpeg.run(
+            "-i",       inputName,
+            "-c:v",     "libx264",
+            "-crf",     "0",
+            "-preset",  "ultrafast",
+            "-c:a",     "copy",
+            "-pix_fmt", "yuv420p",
+            outputName
+        ),
+        new Promise((_, reject) =>
+            setTimeout(() => reject(new Error(
+                "Video encoding timed out after 5 minutes. Try a smaller file or higher CRF value."
+            )), 300000)
+        ),
+    ]);
 
     const outputData     = ffmpeg.FS("readFile", outputName);
     const compressedBlob = new Blob([outputData.buffer], { type: "video/mp4" });

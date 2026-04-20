@@ -1,0 +1,34 @@
+{
+    "manifest_version": 3,
+    "name": "File Compressor",
+    "version": "1.0.0",
+    "description": "Compress and decompress PNG, JPEG, text, and video files directly in your browser.",
+
+    "action": {
+        "default_popup": "index.html",
+        "default_title": "File Compressor"
+    },
+
+    "content_security_policy": {
+        "extension_pages": "script-src 'self' 'wasm-unsafe-eval' https://cdn.jsdelivr.net https://unpkg.com; object-src 'self'"
+    },
+
+    "web_accessible_resources": [
+        {
+            "resources": [
+                "lib/ffmpeg-core.js",
+                "lib/ffmpeg-core.wasm",
+                "upng.js"
+            ],
+            "matches": ["<all_urls>"]
+        }
+    ],
+
+    "permissions": [],
+
+    "icons": {
+        "16":  "icons/icon16.png",
+        "48":  "icons/icon48.png",
+        "128": "icons/icon128.png"
+    }
+}
