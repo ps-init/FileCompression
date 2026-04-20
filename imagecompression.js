@@ -5,20 +5,18 @@
  * for the MACS JC Project 2 Chrome Extension.
  *
  * Libraries used:
- *   - UPNG.js  (lib/upng.js) : Optimised PNG encoder with DEFLATE compression.
- *                               Chosen for its lossless guarantee and compression
- *                               level control unavailable in the Canvas API.
- *
- *   - JPEG     : Uses the browser's built-in Canvas API (canvas.toBlob with
- *                "image/jpeg" mime type). No external library required.
- *                Chrome's native JPEG encoder is faster, always available,
- *                and produces smaller files than pure-JS alternatives.
+ *   - UPNG.js  (upng.js at repo root) : Optimised PNG encoder with DEFLATE.
+ *                                        Requires pako loaded before it.
+ *   - pako     (CDN)                  : DEFLATE engine required by UPNG.js.
+ *   - JPEG     : Browser Canvas API   : No external library needed.
  *
  * Required load order in HTML:
- *   1. lib/upng.js
- *   2. imageCompression.js
+ *   1. pako CDN
+ *   2. upng.js
+ *   3. imageCompression.js
  */
 
+"use strict";
 
 /* ─────────────────────────────────────────────────────────────────────────────
    SECTION 1 — FILE READING UTILITIES
@@ -26,69 +24,55 @@
 
 /**
  * Reads a File object into a raw ArrayBuffer.
- * Used to get the original byte content for hashing.
- *
- * @param {File} file - Any File object from an <input type="file">
- * @returns {Promise<ArrayBuffer>} The raw byte contents of the file
+ * @param {File} file
+ * @returns {Promise<ArrayBuffer>}
  */
 function readFileAsArrayBuffer(file) {
     return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload  = (event) => resolve(event.target.result);
-        reader.onerror = () => reject(new Error("FileReader failed for: " + file.name));
+        const reader   = new FileReader();
+        reader.onload  = (e) => resolve(e.target.result);
+        reader.onerror = () => reject(new Error("FileReader failed: " + file.name));
         reader.readAsArrayBuffer(file);
     });
 }
 
 /**
- * Decodes any browser-supported image file into raw RGBA pixel data
- * by drawing it onto an offscreen canvas.
+ * Decodes any browser-supported image into raw RGBA pixel data via canvas.
+ * Returns data, width, height, and the canvas element for reuse.
  *
- * The returned `data` is a Uint8ClampedArray where every 4 values
- * represent one pixel as [R, G, B, A].
- *
- * @param {File|Blob} imageFile - The image to decode
+ * @param {File|Blob} imageFile
  * @returns {Promise<{data: Uint8ClampedArray, width: number, height: number, canvas: HTMLCanvasElement}>}
  */
 function decodeImageToRGBA(imageFile) {
     return new Promise((resolve, reject) => {
-        const image     = new Image();
-        const objectURL = URL.createObjectURL(imageFile);
+        const img = new Image();
+        const url = URL.createObjectURL(imageFile);
 
-        image.onload = () => {
+        img.onload = () => {
             const canvas  = document.createElement("canvas");
-            canvas.width  = image.naturalWidth;
-            canvas.height = image.naturalHeight;
-
-            const context   = canvas.getContext("2d");
-            context.drawImage(image, 0, 0);
-
-            const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
-            URL.revokeObjectURL(objectURL);
-
-            resolve({
-                data:    imageData.data,
-                width:   canvas.width,
-                height:  canvas.height,
-                canvas,          // returned so JPEG encoder can reuse it
-                context,
-            });
+            canvas.width  = img.naturalWidth;
+            canvas.height = img.naturalHeight;
+            const ctx     = canvas.getContext("2d");
+            ctx.drawImage(img, 0, 0);
+            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            URL.revokeObjectURL(url);
+            resolve({ data: imageData.data, width: canvas.width, height: canvas.height, canvas, ctx });
         };
 
-        image.onerror = () => {
-            URL.revokeObjectURL(objectURL);
+        img.onerror = () => {
+            URL.revokeObjectURL(url);
             reject(new Error("Failed to decode image: " + imageFile.name));
         };
 
-        image.src = objectURL;
+        img.src = url;
     });
 }
 
 /**
- * Reads the pixel data out of a Blob that contains a JPEG (or any image).
- * Used during decompression to get the rebuilt pixel array for PSNR/SSIM.
+ * Alias — decodes a Blob (e.g. compressed JPEG) back to RGBA pixels.
+ * Used during decompression to get rebuilt pixels for PSNR/SSIM.
  *
- * @param {Blob} imageBlob - An image blob (JPEG, PNG, etc.)
+ * @param {Blob} imageBlob
  * @returns {Promise<{data: Uint8ClampedArray, width: number, height: number}>}
  */
 function decodeBlobToRGBA(imageBlob) {
@@ -97,19 +81,15 @@ function decodeBlobToRGBA(imageBlob) {
 
 /**
  * Converts a canvas to a JPEG Blob using the browser's native encoder.
- * Quality is a float 0.0–1.0 (we convert from 1–100 scale before calling).
  *
- * @param {HTMLCanvasElement} canvas  - Canvas with the image drawn on it
- * @param {number}            quality - Float 0.0–1.0
- * @returns {Promise<Blob>} JPEG blob
+ * @param {HTMLCanvasElement} canvas
+ * @param {number} quality - Float 0.0–1.0
+ * @returns {Promise<Blob>}
  */
 function canvasToJPEGBlob(canvas, quality) {
     return new Promise((resolve, reject) => {
         canvas.toBlob(
-            (blob) => {
-                if (blob) resolve(blob);
-                else reject(new Error("canvas.toBlob failed — browser could not encode JPEG."));
-            },
+            (blob) => blob ? resolve(blob) : reject(new Error("canvas.toBlob failed.")),
             "image/jpeg",
             quality
         );
@@ -122,11 +102,9 @@ function canvasToJPEGBlob(canvas, quality) {
    ───────────────────────────────────────────────────────────────────────────── */
 
 /**
- * Computes the compression ratio (PDF Section 6.1).
- * Formula: originalSize / compressedSize
- *
- * @param {number} originalSize   - Original file size in bytes
- * @param {number} compressedSize - Compressed file size in bytes
+ * Compression ratio: originalSize / compressedSize  (PDF 6.1)
+ * @param {number} originalSize
+ * @param {number} compressedSize
  * @returns {string} e.g. "4.32:1"
  */
 function computeCompressionRatio(originalSize, compressedSize) {
@@ -135,154 +113,123 @@ function computeCompressionRatio(originalSize, compressedSize) {
 }
 
 /**
- * Computes the space savings percentage (PDF Section 6.2).
- * Formula: ((original - compressed) / original) × 100
- *
- * @param {number} originalSize   - Original file size in bytes
- * @param {number} compressedSize - Compressed file size in bytes
+ * Space savings percentage  (PDF 6.2)
+ * @param {number} originalSize
+ * @param {number} compressedSize
  * @returns {string} e.g. "76.85%"
  */
 function computeSpaceSavings(originalSize, compressedSize) {
-    const percentage = ((originalSize - compressedSize) / originalSize) * 100;
-    return percentage.toFixed(2) + "%";
+    return (((originalSize - compressedSize) / originalSize) * 100).toFixed(2) + "%";
 }
 
 /**
- * Computes Peak Signal-to-Noise Ratio (PSNR) between original and compressed
- * pixel arrays (PDF Section 6.3). Higher is better.
- * Threshold: >40 dB = excellent, <25 dB = visibly degraded.
- * Only RGB channels used; alpha is excluded.
+ * Peak Signal-to-Noise Ratio between two RGBA pixel arrays  (PDF 6.3)
+ * >40 dB = excellent, <25 dB = visibly degraded.
  *
- * @param {Uint8ClampedArray} originalPixels   - RGBA pixels of original image
- * @param {Uint8ClampedArray} compressedPixels - RGBA pixels of compressed image
+ * @param {Uint8ClampedArray} originalPixels
+ * @param {Uint8ClampedArray} compressedPixels
  * @returns {string} e.g. "37.42 dB"
  */
 function computePSNR(originalPixels, compressedPixels) {
-    if (originalPixels.length !== compressedPixels.length) {
-        return "N/A (size mismatch)";
-    }
+    if (originalPixels.length !== compressedPixels.length) return "N/A (size mismatch)";
 
-    let sumSquaredError = 0;
-    const totalPixels   = originalPixels.length / 4;
+    let sse = 0;
+    const n = originalPixels.length / 4;
 
     for (let i = 0; i < originalPixels.length; i += 4) {
-        const redDiff   = originalPixels[i]     - compressedPixels[i];
-        const greenDiff = originalPixels[i + 1] - compressedPixels[i + 1];
-        const blueDiff  = originalPixels[i + 2] - compressedPixels[i + 2];
-        sumSquaredError += (redDiff * redDiff + greenDiff * greenDiff + blueDiff * blueDiff) / 3;
+        const dr = originalPixels[i]     - compressedPixels[i];
+        const dg = originalPixels[i + 1] - compressedPixels[i + 1];
+        const db = originalPixels[i + 2] - compressedPixels[i + 2];
+        sse += (dr * dr + dg * dg + db * db) / 3;
     }
 
-    const meanSquaredError = sumSquaredError / totalPixels;
-    if (meanSquaredError === 0) return "Identical (∞ dB)";
-
-    return (10 * Math.log10((255 * 255) / meanSquaredError)).toFixed(2) + " dB";
+    const mse = sse / n;
+    if (mse === 0) return "Identical (∞ dB)";
+    return (10 * Math.log10(65025 / mse)).toFixed(2) + " dB";
 }
 
 /**
- * Computes the Structural Similarity Index (SSIM) between original and compressed
- * images using luminance values (PDF Section 6.3). Returns 0–1; 1 = perfect match.
+ * Structural Similarity Index between two RGBA pixel arrays  (PDF 6.3)
+ * Returns 0–1; 1 = perfect match.
  *
- * @param {Uint8ClampedArray} originalPixels   - RGBA pixels of original image
- * @param {Uint8ClampedArray} compressedPixels - RGBA pixels of compressed image
+ * @param {Uint8ClampedArray} originalPixels
+ * @param {Uint8ClampedArray} compressedPixels
  * @returns {string} e.g. "0.9812"
  */
 function computeSSIM(originalPixels, compressedPixels) {
-    if (originalPixels.length !== compressedPixels.length) {
-        return "N/A (size mismatch)";
+    if (originalPixels.length !== compressedPixels.length) return "N/A (size mismatch)";
+
+    const C1 = (0.01 * 255) ** 2;
+    const C2 = (0.03 * 255) ** 2;
+    const n  = originalPixels.length / 4;
+
+    const lumA = new Float32Array(n);
+    const lumB = new Float32Array(n);
+
+    for (let i = 0; i < n; i++) {
+        const o = i * 4;
+        lumA[i] = 0.299 * originalPixels[o]   + 0.587 * originalPixels[o+1]   + 0.114 * originalPixels[o+2];
+        lumB[i] = 0.299 * compressedPixels[o] + 0.587 * compressedPixels[o+1] + 0.114 * compressedPixels[o+2];
     }
 
-    const C1         = (0.01 * 255) ** 2;
-    const C2         = (0.03 * 255) ** 2;
-    const pixelCount = originalPixels.length / 4;
+    let muA = 0, muB = 0;
+    for (let i = 0; i < n; i++) { muA += lumA[i]; muB += lumB[i]; }
+    muA /= n; muB /= n;
 
-    const luminanceOriginal   = new Float32Array(pixelCount);
-    const luminanceCompressed = new Float32Array(pixelCount);
-
-    for (let i = 0; i < pixelCount; i++) {
-        const byteOffset = i * 4;
-        luminanceOriginal[i]   = 0.299 * originalPixels[byteOffset]   + 0.587 * originalPixels[byteOffset + 1]   + 0.114 * originalPixels[byteOffset + 2];
-        luminanceCompressed[i] = 0.299 * compressedPixels[byteOffset] + 0.587 * compressedPixels[byteOffset + 1] + 0.114 * compressedPixels[byteOffset + 2];
+    let vA = 0, vB = 0, cov = 0;
+    for (let i = 0; i < n; i++) {
+        const da = lumA[i] - muA, db = lumB[i] - muB;
+        vA += da * da; vB += db * db; cov += da * db;
     }
+    vA /= n; vB /= n; cov /= n;
 
-    let meanOriginal   = 0;
-    let meanCompressed = 0;
-    for (let i = 0; i < pixelCount; i++) {
-        meanOriginal   += luminanceOriginal[i];
-        meanCompressed += luminanceCompressed[i];
-    }
-    meanOriginal   /= pixelCount;
-    meanCompressed /= pixelCount;
-
-    let varianceOriginal   = 0;
-    let varianceCompressed = 0;
-    let covariance         = 0;
-    for (let i = 0; i < pixelCount; i++) {
-        const diffOriginal   = luminanceOriginal[i]   - meanOriginal;
-        const diffCompressed = luminanceCompressed[i] - meanCompressed;
-        varianceOriginal   += diffOriginal   * diffOriginal;
-        varianceCompressed += diffCompressed * diffCompressed;
-        covariance         += diffOriginal   * diffCompressed;
-    }
-    varianceOriginal   /= pixelCount;
-    varianceCompressed /= pixelCount;
-    covariance         /= pixelCount;
-
-    const numerator   = (2 * meanOriginal * meanCompressed + C1) * (2 * covariance + C2);
-    const denominator = (meanOriginal ** 2 + meanCompressed ** 2 + C1) * (varianceOriginal + varianceCompressed + C2);
-
-    return (numerator / denominator).toFixed(4);
+    return (((2 * muA * muB + C1) * (2 * cov + C2)) /
+            ((muA * muA + muB * muB + C1) * (vA + vB + C2))).toFixed(4);
 }
 
 /**
- * Computes a SHA-256 hash of raw bytes using the built-in SubtleCrypto Web API.
- * No external library needed — available natively in Chrome (PDF Section 6.4).
- *
- * @param {ArrayBuffer} buffer - The file bytes to hash
- * @returns {Promise<string>} Lowercase hex-encoded SHA-256 string
+ * SHA-256 hash via SubtleCrypto — no external library needed  (PDF 6.4)
+ * @param {ArrayBuffer} buffer
+ * @returns {Promise<string>} hex string
  */
 async function computeSHA256(buffer) {
     const hashBuffer = await crypto.subtle.digest("SHA-256", buffer);
-    const hashBytes  = Array.from(new Uint8Array(hashBuffer));
-    return hashBytes.map((byte) => byte.toString(16).padStart(2, "0")).join("");
+    return Array.from(new Uint8Array(hashBuffer))
+                .map((b) => b.toString(16).padStart(2, "0"))
+                .join("");
 }
 
 /**
- * Formats a raw byte count into a human-readable string.
- *
- * @param {number} bytes - File size in bytes
+ * Human-readable file size.
+ * @param {number} bytes
  * @returns {string} e.g. "2.31 MB"
  */
 function formatBytes(bytes) {
     if (bytes < 1024)               return bytes + " B";
-    if (bytes < 1024 * 1024)        return (bytes / 1024).toFixed(2) + " KB";
-    if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(2) + " MB";
-    return (bytes / (1024 * 1024 * 1024)).toFixed(2) + " GB";
+    if (bytes < 1048576)            return (bytes / 1024).toFixed(2) + " KB";
+    if (bytes < 1073741824)         return (bytes / 1048576).toFixed(2) + " MB";
+    return (bytes / 1073741824).toFixed(2) + " GB";
 }
 
 
 /* ─────────────────────────────────────────────────────────────────────────────
-   SECTION 3 — JPEG LOSSY COMPRESSION  (Canvas API — no external library)
+   SECTION 3 — JPEG LOSSY COMPRESSION  (Canvas API)
    ───────────────────────────────────────────────────────────────────────────── */
 
 /**
  * Compresses an image to JPEG using the browser's built-in Canvas API.
  *
- * Why Canvas API instead of jpeg-js:
- *   - No external library needed — works in every Chrome version
- *   - Uses Chrome's native C++ JPEG encoder — faster and smaller output
- *   - The quality parameter (0–100) maps directly to canvas.toBlob quality (0.0–1.0)
- *   - Output blob can be decoded back to pixels via a second canvas draw,
- *     allowing PSNR/SSIM measurement just as accurately as jpeg-js would
+ * No external library needed. Chrome's native C++ encoder is used via
+ * canvas.toBlob("image/jpeg", quality). PSNR and SSIM are computed by
+ * decoding the output back to pixels via a second canvas draw.
  *
  * Quality guide:
- *   90–100 = near-original quality, large file
- *   70–89  = good balance (recommended default: 75)
- *   40–69  = visible artefacts, much smaller
- *   10–39  = heavy compression, very small
+ *   90–100 = near-original,  70–89 = good balance (default 75),
+ *   40–69  = visible artefacts,  10–39 = heavy compression
  *
- * @param {File}   imageFile - Input image (PNG, JPG, WebP, GIF, etc.)
- * @param {number} quality   - JPEG quality 1–100. Default: 75
- * @returns {Promise<Object>} Result with compressedBlob, size metrics, PSNR, SSIM
+ * @param {File}   imageFile - Input image (PNG / JPG / WebP etc.)
+ * @param {number} quality   - 1–100. Default: 75
+ * @returns {Promise<Object>}
  */
 async function compressImageJPEG(imageFile, quality = 75) {
     quality = Math.max(1, Math.min(100, Math.round(quality)));
@@ -290,39 +237,25 @@ async function compressImageJPEG(imageFile, quality = 75) {
     const originalSize = imageFile.size;
     const { data: originalPixels, width, height, canvas } = await decodeImageToRGBA(imageFile);
 
-    const encodeCanvas  = document.createElement("canvas");
-    encodeCanvas.width  = width;
-    encodeCanvas.height = height;
-    const encodeContext = encodeCanvas.getContext("2d");
-    encodeContext.fillStyle = "#ffffff";
-    encodeContext.fillRect(0, 0, width, height);
-    encodeContext.drawImage(canvas, 0, 0);
+    // Composite onto white background (JPEG has no alpha channel)
+    const encCanvas = document.createElement("canvas");
+    encCanvas.width  = width;
+    encCanvas.height = height;
+    const encCtx = encCanvas.getContext("2d");
+    encCtx.fillStyle = "#ffffff";
+    encCtx.fillRect(0, 0, width, height);
+    encCtx.drawImage(canvas, 0, 0);
 
-    // Try the requested quality first
-    let compressedBlob = await canvasToJPEGBlob(encodeCanvas, quality / 100);
+    const compressedBlob = await canvasToJPEGBlob(encCanvas, quality / 100);
+    const compressedSize = compressedBlob.size;
 
-    // ✅ FIX: If still larger, progressively lower quality until we get a win
-    const qualitySteps = [60, 50, 40, 30];
-    for (const q of qualitySteps) {
-        if (compressedBlob.size < originalSize) break;
-        compressedBlob = await canvasToJPEGBlob(encodeCanvas, q / 100);
-    }
-
-    // ✅ FIX: If we still can't beat the original, just return the original
-    let finalBlob      = compressedBlob;
-    let usedQuality    = quality;
-    if (compressedBlob.size >= originalSize) {
-        finalBlob   = imageFile;   // return original unchanged
-        usedQuality = 100;         // signal no compression applied
-    }
-
-    const compressedSize = finalBlob.size;
-    const { data: compressedPixels } = await decodeBlobToRGBA(finalBlob);
+    // Decode compressed JPEG back to pixels for quality measurement
+    const { data: compressedPixels } = await decodeBlobToRGBA(compressedBlob);
 
     return {
         type:             "lossy",
         format:           "JPEG",
-        compressedBlob:   finalBlob,
+        compressedBlob,
         originalSize,
         compressedSize,
         originalSizeHR:   formatBytes(originalSize),
@@ -331,8 +264,8 @@ async function compressImageJPEG(imageFile, quality = 75) {
         savings:          computeSpaceSavings(originalSize, compressedSize),
         psnr:             computePSNR(originalPixels, compressedPixels),
         ssim:             computeSSIM(originalPixels, compressedPixels),
-        originalPixels,
-        quality:          usedQuality,
+        originalPixels,   // Uint8ClampedArray — stored in session for decompressJPEG()
+        quality,
         width,
         height,
     };
@@ -340,23 +273,25 @@ async function compressImageJPEG(imageFile, quality = 75) {
 
 
 /* ─────────────────────────────────────────────────────────────────────────────
-   SECTION 4 — PNG LOSSLESS COMPRESSION  (UPNG.js)
+   SECTION 4 — PNG LOSSLESS COMPRESSION  (UPNG.js + pako)
    ───────────────────────────────────────────────────────────────────────────── */
 
 /**
- * Compresses an image to PNG using UPNG.js with DEFLATE lossless compression.
+ * Compresses an image to PNG using UPNG.js (DEFLATE, lossless).
  *
- * UPNG.js was chosen because it:
- *   - Applies genuine DEFLATE compression to reduce PNG file size
- *   - Guarantees lossless output (colorDepth = 0 preserves full RGBA)
- *   - Gives compression control that the Canvas API does not expose
+ * UPNG.js was chosen because it applies genuine DEFLATE compression,
+ * guarantees lossless output, and exposes compression level control
+ * that the Canvas API does not provide. pako must be loaded before upng.js.
  *
- * @param {File} imageFile - Input image (any browser-supported format)
- * @returns {Promise<Object>} Result with compressedBlob, metrics, SHA-256 hashes
+ * @param {File} imageFile - Any browser-supported image format
+ * @returns {Promise<Object>}
  */
 async function compressImagePNG(imageFile) {
     if (typeof UPNG === "undefined") {
-        throw new Error("UPNG.js is not loaded. Add <script src='lib/upng.js'> before imageCompression.js.");
+        throw new Error(
+            "UPNG is not defined. Make sure pako CDN loads before upng.js, " +
+            "and upng.js loads before imageCompression.js."
+        );
     }
 
     const originalBuffer = await readFileAsArrayBuffer(imageFile);
@@ -365,6 +300,8 @@ async function compressImagePNG(imageFile) {
 
     const { data: originalPixels, width, height } = await decodeImageToRGBA(imageFile);
 
+    // UPNG.encode(frames, width, height, colorDepth)
+    // colorDepth = 0 means auto — preserves full RGBA depth (lossless)
     const compressedBuffer = UPNG.encode([originalPixels.buffer], width, height, 0);
     const compressedSize   = compressedBuffer.byteLength;
     const compressedBlob   = new Blob([compressedBuffer], { type: "image/png" });
@@ -389,48 +326,40 @@ async function compressImagePNG(imageFile) {
 
 
 /* ─────────────────────────────────────────────────────────────────────────────
-   SECTION 5 — REBUILD VERIFICATION
+   SECTION 5 — REBUILD VERIFICATION  (PDF 6.4)
    ───────────────────────────────────────────────────────────────────────────── */
 
 /**
- * Verifies a PNG rebuild by comparing the SHA-256 of the re-uploaded file
- * against the hash stored during compression (PDF Section 6.4).
- *
- * @param {File}   reuploadedFile - The compressed PNG uploaded back by the user
- * @param {string} storedHash     - SHA-256 hash returned by compressImagePNG()
- * @returns {Promise<Object>} Verification result with match status and download blob
+ * Verifies a PNG rebuild via SHA-256 hash comparison.
+ * @param {File}   reuploadedFile
+ * @param {string} storedHash
+ * @returns {Promise<Object>}
  */
 async function verifyPNGRebuild(reuploadedFile, storedHash) {
     const fileBuffer  = await readFileAsArrayBuffer(reuploadedFile);
     const rebuiltHash = await computeSHA256(fileBuffer);
     const isMatch     = rebuiltHash === storedHash;
-
     return {
         rebuiltHash,
         storedHash,
         isMatch,
-        status: isMatch
-            ? "✅ Perfect rebuild — SHA-256 hashes match"
-            : "❌ Hash mismatch — file may have been modified",
+        status:       isMatch ? "✅ Perfect rebuild — SHA-256 hashes match" : "❌ Hash mismatch",
         downloadBlob: new Blob([fileBuffer], { type: "image/png" }),
     };
 }
 
 /**
- * Verifies a JPEG rebuild by computing PSNR and SSIM between the original
- * pixel data and the re-decoded JPEG (PDF Section 8.1).
+ * Verifies a JPEG rebuild by computing PSNR/SSIM against original pixels.
+ * Uses Canvas API — no jpeg-js needed.
  *
- * Uses Canvas API to decode the JPEG — no jpeg-js required.
- *
- * @param {File}              reuploadedFile   - The compressed JPEG uploaded back
- * @param {Uint8ClampedArray} originalPixels   - Pixel data saved from compressImageJPEG()
- * @param {number}            originalSize     - Original file size in bytes
- * @returns {Promise<Object>} Quality metrics and download blob
+ * @param {File}              reuploadedFile
+ * @param {Uint8ClampedArray} originalPixels
+ * @param {number}            originalSize
+ * @returns {Promise<Object>}
  */
 async function verifyJPEGRebuild(reuploadedFile, originalPixels, originalSize) {
     const { data: rebuiltPixels } = await decodeBlobToRGBA(reuploadedFile);
     const compressedSize          = reuploadedFile.size;
-
     return {
         psnr:             computePSNR(originalPixels, rebuiltPixels),
         ssim:             computeSSIM(originalPixels, rebuiltPixels),
@@ -448,19 +377,17 @@ async function verifyJPEGRebuild(reuploadedFile, originalPixels, originalSize) {
    ───────────────────────────────────────────────────────────────────────────── */
 
 /**
- * Triggers a file download in the browser for a given Blob.
- *
- * @param {Blob}   blob     - The file data to download
- * @param {string} filename - The filename shown in the save dialog
- * @returns {void}
+ * Triggers a browser download for a Blob.
+ * @param {Blob}   blob
+ * @param {string} filename
  */
 function downloadBlob(blob, filename) {
-    const objectURL = URL.createObjectURL(blob);
-    const anchor    = document.createElement("a");
-    anchor.href     = objectURL;
+    const url    = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href     = url;
     anchor.download = filename;
     document.body.appendChild(anchor);
     anchor.click();
     document.body.removeChild(anchor);
-    setTimeout(() => URL.revokeObjectURL(objectURL), 1000);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
 }

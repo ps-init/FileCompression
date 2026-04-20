@@ -5,123 +5,231 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>File Compressor</title>
     <link rel="stylesheet" href="popup.css">
+    <style>
+        /* ── Quality slider rows ────────────────────────────────── */
+        #jpeg-quality-row,
+        #video-crf-row {
+            display: none;
+            margin-top: 12px;
+            padding: 12px 14px;
+            background: #f8f9fa;
+            border-radius: 8px;
+            border: 1px solid #e2e8f0;
+        }
+        #jpeg-quality-row label,
+        #video-crf-row label {
+            font-size: 0.85rem;
+            font-weight: 600;
+            color: #4a5568;
+            display: block;
+            margin-bottom: 6px;
+        }
+        .slider-wrap {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        #jpeg-quality,
+        #video-crf { flex: 1; accent-color: #6c63ff; }
+        #jpeg-quality-val,
+        #video-crf-val {
+            font-weight: 700;
+            color: #6c63ff;
+            min-width: 32px;
+            text-align: right;
+        }
+        /* ── Hash display ───────────────────────────────────────── */
+        .hash-display {
+            margin-top: 10px;
+            font-size: 0.75rem;
+            word-break: break-all;
+        }
+        code.hash-code {
+            display: block;
+            background: #1e293b;
+            color: #a78bfa;
+            padding: 8px 10px;
+            border-radius: 6px;
+            font-size: 0.7rem;
+            margin-top: 4px;
+        }
+        /* ── Quality metrics ────────────────────────────────────── */
+        .quality-metrics {
+            margin-top: 10px;
+            padding: 10px 12px;
+            background: #f0fdf4;
+            border-radius: 8px;
+            border: 1px solid #bbf7d0;
+            font-size: 0.82rem;
+            line-height: 1.7;
+        }
+        .quality-note { color: #64748b; font-size: 0.75rem; margin-top: 4px; }
+        /* ── Verify status ──────────────────────────────────────── */
+        .verify-status {
+            padding: 10px 14px;
+            border-radius: 8px;
+            font-weight: 600;
+            font-size: 0.85rem;
+            margin-bottom: 10px;
+        }
+        .verify-status.pass { background:#f0fdf4; color:#16a34a; border:1px solid #bbf7d0; }
+        .verify-status.fail { background:#fef2f2; color:#dc2626; border:1px solid #fecaca; }
+        /* ── Check list ─────────────────────────────────────────── */
+        .check-list { list-style:none; padding:0; margin:8px 0; font-size:0.82rem; line-height:1.8; }
+        /* ── Drag over ──────────────────────────────────────────── */
+        .upload-area.drag-over { border-color:#6c63ff !important; background:#f5f3ff !important; }
+    </style>
 </head>
 <body>
-    <div class="container">
-        <!-- Header -->
-        <h1>📦 File Compressor</h1>
-        <p class="subtitle">Compress & decompress files in the browser</p>
+<div class="container">
 
-        <!-- Upload Section -->
-        <div class="section">
-            <h2>Step 1: Upload File</h2>
-            <div class="upload-area" id="uploadArea">
-                <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-                    <polyline points="17 8 12 3 7 8"></polyline>
-                    <line x1="12" y1="3" x2="12" y2="15"></line>
-                </svg>
-                <p>Drag file here or click to upload</p>
-                <p class="file-types">Supported: .txt, .csv, .png, .jpg, .wav, .mp3, .mp4</p>
-                <input 
-                    type="file" 
-                    id="fileInput" 
-                    accept=".txt,.csv,.png,.jpg,.jpeg,.wav,.mp3,.mp4"
-                    style="display: none;"
-                >
+    <h1>📦 File Compressor</h1>
+    <p class="subtitle">Compress &amp; decompress files in the browser</p>
+
+    <!-- ── STEP 1: Upload ───────────────────────────────────────────── -->
+    <div class="section">
+        <h2>Step 1: Upload File</h2>
+
+        <div class="upload-area" id="uploadArea">
+            <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="17 8 12 3 7 8"></polyline>
+                <line x1="12" y1="3" x2="12" y2="15"></line>
+            </svg>
+            <p>Drag file here or click to upload</p>
+            <p class="file-types">Supported: .txt .csv .png .jpg .jpeg .wav .mp3 .mp4</p>
+            <input type="file" id="compress-input"
+                   accept=".txt,.csv,.png,.jpg,.jpeg,.wav,.mp3,.mp4"
+                   style="display:none;">
+        </div>
+
+        <!-- JPEG quality slider — shown only for .jpg/.jpeg files -->
+        <div id="jpeg-quality-row">
+            <label for="jpeg-quality">
+                JPEG Quality: <span id="jpeg-quality-val">75</span> / 100
+            </label>
+            <div class="slider-wrap">
+                <span style="font-size:0.75rem;color:#94a3b8">Low (smaller)</span>
+                <input type="range" id="jpeg-quality" min="1" max="100" value="75">
+                <span style="font-size:0.75rem;color:#94a3b8">High (larger)</span>
             </div>
         </div>
 
-        <!-- File Info Section -->
-        <div class="section" id="fileInfoSection" style="display: none;">
-            <h2>File Information</h2>
-            <div class="info-box">
-                <p><strong>File Name:</strong> <span id="fileName">-</span></p>
-                <p><strong>File Type:</strong> <span id="fileType">-</span></p>
-                <p><strong>Original Size:</strong> <span id="originalSize">-</span></p>
+        <!-- Video CRF slider — shown only for video files -->
+        <div id="video-crf-row">
+            <label for="video-crf">
+                Video CRF (Quality): <span id="video-crf-val">23</span> / 51
+                &nbsp;<span style="font-size:0.75rem;color:#94a3b8">(0 = lossless, 23 = default, 51 = worst)</span>
+            </label>
+            <div class="slider-wrap">
+                <span style="font-size:0.75rem;color:#94a3b8">Best (larger)</span>
+                <input type="range" id="video-crf" min="0" max="51" value="23">
+                <span style="font-size:0.75rem;color:#94a3b8">Worst (smaller)</span>
             </div>
         </div>
 
-        <!-- Compression Metrics Section -->
-        <div class="section" id="metricsSection" style="display: none;">
-            <h2>Step 2: Compression Results</h2>
-            <div class="metrics-box">
-                <div class="metric">
-                    <label>Original Size</label>
-                    <p id="metricOriginal">0 bytes</p>
-                </div>
-                <div class="metric">
-                    <label>Compressed Size</label>
-                    <p id="metricCompressed">0 bytes</p>
-                </div>
-                <div class="metric">
-                    <label>Compression Ratio</label>
-                    <p id="metricRatio">0:1</p>
-                </div>
-                <div class="metric highlight">
-                    <label>Space Saved</label>
-                    <p id="metricSavings">0%</p>
-                </div>
-            </div>
+        <button id="compress-btn" class="btn btn-primary" style="margin-top:12px;">
+            ⚙️ Compress File
+        </button>
+    </div>
 
-            <div class="button-group">
-                <button id="downloadCompressed" class="btn btn-primary">⬇️ Download Compressed</button>
-                <button id="reuploadBtn" class="btn btn-secondary">🔄 Upload Compressed File</button>
-            </div>
-        </div>
-
-        <!-- Re-upload (Decompression) Section -->
-        <div class="section" id="decompressSection" style="display: none;">
-            <h2>Step 3: Verify Decompression</h2>
-            <p class="instruction-text">Upload the compressed file to verify it decompresses correctly.</p>
-            <div class="upload-area-small" id="reuploadArea">
-                <p>Click to re-upload compressed file</p>
-                <input 
-                    type="file" 
-                    id="reuploadInput"
-                    style="display: none;"
-                >
-            </div>
-        </div>
-
-        <!-- Verification Results Section -->
-        <div class="section" id="verificationSection" style="display: none;">
-            <h2>Verification Results</h2>
-            <div class="results-box" id="resultsBox">
-                <!-- Results will be inserted here -->
-            </div>
-        </div>
-
-        <!-- Error Message -->
-        <div class="error-message" id="errorMessage" style="display: none;"></div>
-
-        <!-- Loading Spinner -->
-        <div class="loading-spinner" id="loadingSpinner" style="display: none;">
-            <div class="spinner"></div>
-            <p>Processing file...</p>
-        </div>
-
-        <!-- Footer -->
-        <div class="footer">
-            <p>💡 Tip: Compression works best with text files and certain image types.</p>
+    <!-- ── File Info ────────────────────────────────────────────────── -->
+    <div class="section" id="fileInfoSection" style="display:none;">
+        <h2>File Information</h2>
+        <div class="info-box">
+            <p><strong>File Name:</strong> <span id="fileName">—</span></p>
+            <p><strong>File Type:</strong> <span id="fileType">—</span></p>
+            <p><strong>Original Size:</strong> <span id="originalSize">—</span></p>
         </div>
     </div>
 
-    <!-- Libraries -->
-    <script src="lib/pako.min.js"></script>
-    <script src="lib/jpeg.js"></script>
-    <script src="lib/lame.min.js"></script>
-    <script src="https://unpkg.com/@ffmpeg/ffmpeg@0.11.0/dist/ffmpeg.min.js"></script>
+    <!-- ── STEP 2: Compression Results ─────────────────────────────── -->
+    <div class="section" id="metricsSection" style="display:none;">
+        <h2>Step 2: Compression Results</h2>
+        <div class="metrics-box">
+            <div class="metric">
+                <label>Original Size</label>
+                <p id="metricOriginal">—</p>
+            </div>
+            <div class="metric">
+                <label>Compressed Size</label>
+                <p id="metricCompressed">—</p>
+            </div>
+            <div class="metric">
+                <label>Compression Ratio</label>
+                <p id="metricRatio">—</p>
+            </div>
+            <div class="metric highlight">
+                <label>Space Saved</label>
+                <p id="metricSavings">—</p>
+            </div>
+        </div>
+        <div id="metricExtras"></div>
+        <div class="button-group">
+            <button id="downloadCompressed" class="btn btn-primary">⬇️ Download Compressed</button>
+            <button id="reuploadBtn" class="btn btn-secondary">🔄 Upload to Verify / Decompress</button>
+        </div>
+    </div>
 
-    <!-- Compression / decompression modules -->
-    <script src="textcompression.js"></script>
-     <script src="lib/upng.js"></script>
-    <script src="imagecompression.js"></script>
-    <script src="imagedecompression.js"></script>
-    <script src="videocompression.js"></script>
-    <script src="videodecompression.js"></script>
+    <!-- ── STEP 3: Decompression / Verify ──────────────────────────── -->
+    <div class="section" id="decompressSection" style="display:none;">
+        <h2>Step 3: Verify Decompression</h2>
+        <p class="instruction-text">Upload the compressed file you just downloaded to verify it.</p>
+        <div class="upload-area-small" id="reuploadArea">
+            <p>Click to re-upload compressed file</p>
+            <input type="file" id="decompress-input" style="display:none;">
+        </div>
+        <button id="decompress-btn" class="btn btn-secondary" style="margin-top:12px;">
+            🔍 Verify / Decompress
+        </button>
+    </div>
 
-    <!-- UI logic — must load last -->
-    <script src="popup.js"></script>
+    <!-- ── Verification Results ─────────────────────────────────────── -->
+    <div class="section" id="verificationSection" style="display:none;">
+        <h2>Verification Results</h2>
+        <div class="results-box" id="resultsBox"></div>
+    </div>
+
+    <!-- ── Error (in UI — PDF 10.2) ─────────────────────────────────── -->
+    <div class="error-message" id="errorMessage" style="display:none;"></div>
+
+    <!-- ── Loading spinner ──────────────────────────────────────────── -->
+    <div class="loading-spinner" id="loadingSpinner" style="display:none;">
+        <div class="spinner"></div>
+        <p id="loadingText">Processing file…</p>
+    </div>
+
+    <div class="footer">
+        <p>💡 PNG = lossless (perfect rebuild). JPEG = lossy (adjust quality slider).
+           Video = H.264 via ffmpeg.wasm (adjust CRF slider).</p>
+    </div>
+
+</div>
+
+<!--
+    ═══════════════════════════════════════════════════════
+    SCRIPT LOAD ORDER — CRITICAL, DO NOT CHANGE
+    ═══════════════════════════════════════════════════════
+
+    1. pako CDN          — DEFLATE needed by upng.js
+    2. upng.js           — PNG encoder (needs pako global)
+    3. lib/ffmpeg.min.js — ffmpeg.wasm wrapper (needed by videocompression.js)
+    4. imagecompression.js
+    5. imagedecompression.js
+    6. textcompression.js
+    7. videocompression.js  (needs ffmpeg.min.js loaded above)
+    8. videodecompression.js
+    9. popup.js          — ALWAYS LAST
+-->
+<script src="https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js"></script>
+<script src="upng.js"></script>
+<script src="lib/ffmpeg.min.js"></script>
+<script src="imagecompression.js"></script>
+<script src="imagedecompression.js"></script>
+<script src="textcompression.js"></script>
+<script src="videocompression.js"></script>
+<script src="videodecompression.js"></script>
+<script src="popup.js"></script>
+
 </body>
 </html>

@@ -1,64 +1,40 @@
 /**
  * popup.js
  *
- * Orchestration and UI layer for the MACS JC Project 2 Chrome Extension.
- * Wires DOM events from index.html to the compression/decompression modules,
- * stores session state between steps, and renders results into the popup.
+ * Orchestration + UI layer for MACS JC Project 2 Chrome Extension.
+ * Handles compression, decompression, and all DOM display logic.
  *
- * Element IDs used (must match index.html exactly):
- *   #fileInput           - <input type="file"> for the original file
- *   #uploadArea          - clickable upload zone
- *   #fileInfoSection     - section shown after file is picked
- *   #fileName            - span displaying file name
- *   #fileType            - span displaying file type
- *   #originalSize        - span displaying original size
- *   #metricsSection      - section shown after compression
- *   #metricOriginal      - compression result: original size
- *   #metricCompressed    - compression result: compressed size
- *   #metricRatio         - compression result: ratio
- *   #metricSavings       - compression result: space saved
- *   #downloadCompressed  - button to download compressed file
- *   #reuploadBtn         - button to reveal decompression section
- *   #decompressSection   - section for re-uploading compressed file
- *   #reuploadArea        - clickable re-upload zone
- *   #reuploadInput       - <input type="file"> for compressed file
- *   #verificationSection - section showing rebuild/verify results
- *   #resultsBox          - container for verification result cards
- *   #errorMessage        - error display div
- *   #loadingSpinner      - loading overlay
+ * Expected HTML element IDs (index.html):
+ *   #compress-input       <input type="file">
+ *   #compress-btn         <button>
+ *   #decompress-input     <input type="file">
+ *   #decompress-btn       <button>
+ *   #jpeg-quality         <input type="range"> (shown for JPEG files only)
+ *   #jpeg-quality-val     <span> showing current quality number
+ *   #fileInfoSection      section shown after file pick
+ *   #fileName, #fileType, #originalSize
+ *   #metricsSection       shown after compression
+ *   #metricOriginal, #metricCompressed, #metricRatio, #metricSavings
+ *   #metricExtras         extra metrics (PSNR/SSIM or hash)
+ *   #downloadCompressed   download button
+ *   #reuploadBtn          reveals decompressSection
+ *   #decompressSection
+ *   #reuploadArea / #decompress-input
+ *   #decompress-btn
+ *   #verificationSection
+ *   #resultsBox
+ *   #errorMessage
+ *   #loadingSpinner / #loadingText
  */
 
 "use strict";
-
 
 /* ─────────────────────────────────────────────────────────────────────────────
    SECTION 1 — SESSION STATE
    ───────────────────────────────────────────────────────────────────────────── */
 
-/**
- * Holds data from the most recent compression step.
- * Required for decompression verification — stores original pixels,
- * hashes, and metadata depending on file type.
- * Reset to null whenever a new file is uploaded.
- *
- * @type {Object|null}
- */
+/** Persists data between compress and decompress steps. @type {Object|null} */
 let compressionSession = null;
-
-/**
- * Holds the Blob of the most recently compressed file.
- * Used by the download button.
- *
- * @type {Blob|null}
- */
-let compressedFileBlob = null;
-
-/**
- * Holds the suggested download filename for the compressed file.
- *
- * @type {string}
- */
-let compressedFileName = "compressed_file";
 
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -66,63 +42,54 @@ let compressedFileName = "compressed_file";
    ───────────────────────────────────────────────────────────────────────────── */
 
 /**
- * Detects the compression category of a file from its MIME type or extension.
- * Returns null for unsupported types.
- *
- * @param {File} file - The file uploaded by the user
- * @returns {string|null} One of: "image-jpeg", "image-png", "video", "text", "audio", or null
+ * Returns a category string based on file MIME type / extension.
+ * @param {File} file
+ * @returns {string|null}
  */
 function detectFileCategory(file) {
-    const mimeType = file.type.toLowerCase();
-    const fileName = file.name.toLowerCase();
-
-    if (mimeType === "image/jpeg" || fileName.endsWith(".jpg") || fileName.endsWith(".jpeg")) return "image-jpeg";
-    if (mimeType === "image/png"  || fileName.endsWith(".png"))                               return "image-png";
-    if (mimeType.startsWith("video/") || fileName.endsWith(".mp4") || fileName.endsWith(".mov") ||
-        fileName.endsWith(".avi")     || fileName.endsWith(".mkv") || fileName.endsWith(".webm")) return "video";
-    if (mimeType === "text/plain" || mimeType === "text/csv" ||
-        fileName.endsWith(".txt") || fileName.endsWith(".csv"))                               return "text";
-    if (mimeType.startsWith("audio/") || fileName.endsWith(".mp3") || fileName.endsWith(".wav")) return "audio";
-
+    const type = file.type.toLowerCase();
+    const name = file.name.toLowerCase();
+    if (type === "image/jpeg" || name.endsWith(".jpg") || name.endsWith(".jpeg")) return "image-jpeg";
+    if (type === "image/png"  || name.endsWith(".png"))                           return "image-png";
+    if (type.startsWith("video/") || [".mp4",".mov",".avi",".mkv",".webm"].some(e => name.endsWith(e))) return "video";
+    if (type === "text/plain" || type === "text/csv" || name.endsWith(".txt") || name.endsWith(".csv")) return "text";
+    if (type.startsWith("audio/") || name.endsWith(".mp3") || name.endsWith(".wav")) return "audio";
     return null;
 }
 
 
 /* ─────────────────────────────────────────────────────────────────────────────
-   SECTION 3 — COMPRESSION HANDLER
+   SECTION 3 — COMPRESSION ENTRY POINT
    ───────────────────────────────────────────────────────────────────────────── */
 
 /**
- * Main compression entry point. Called when the user selects a file.
- * Routes to the correct module, stores session state, and updates the UI.
+ * Main compression handler — routes to the correct function by file type,
+ * stores session state, and calls displayCompressionResult().
  *
- * @param {File} file - The file selected by the user
- * @returns {Promise<void>}
+ * @param {File}   file
+ * @param {Object} options - { jpegQuality, videoCrf, videoPreset }
  */
-async function handleCompress(file) {
+async function handleCompress(file, options = {}) {
     compressionSession = null;
-    compressedFileBlob = null;
+    hideError();
 
     const category = detectFileCategory(file);
-
     if (!category) {
-        showError(
-            "Unsupported file type: \"" + file.name + "\". " +
-            "Please upload a .txt, .csv, .png, .jpg, .mp3, .wav, or .mp4 file."
-        );
+        showError("Unsupported file type: " + file.name + ". Supported: .txt .csv .png .jpg .jpeg .wav .mp3 .mp4");
         return;
     }
 
-    showSpinner();
+    showProgress("Compressing " + file.name + "…");
 
     try {
         let result;
 
         switch (category) {
 
-            // ── JPEG lossy ────────────────────────────────────────────────
+            /* ── JPEG lossy ──────────────────────────────────────────── */
             case "image-jpeg": {
-                result = await compressImageJPEG(file, 75);
+                const quality = Number(options.jpegQuality) || 75;
+                result = await compressImageJPEG(file, quality);
 
                 compressionSession = {
                     category:       "image-jpeg",
@@ -131,26 +98,23 @@ async function handleCompress(file) {
                     originalWidth:  result.width,
                     originalHeight: result.height,
                     originalName:   file.name,
+                    compressedBlob: result.compressedBlob,
                 };
 
-                compressedFileBlob = result.compressedBlob;
-                compressedFileName = file.name.replace(/\.[^.]+$/, "") + "_compressed.jpg";
-
                 displayCompressionResult({
-                    type:           "Lossy — JPEG",
+                    type:           "Lossy — JPEG (quality " + result.quality + "/100)",
                     originalSize:   result.originalSizeHR,
                     compressedSize: result.compressedSizeHR,
                     ratio:          result.ratio,
                     savings:        result.savings,
-                    extraLines:     [
-                        "PSNR: " + result.psnr,
-                        "SSIM: " + result.ssim,
-                    ],
+                    qualityMetrics: { psnr: result.psnr, ssim: result.ssim },
+                    compressedBlob: result.compressedBlob,
+                    downloadName:   file.name.replace(/\.[^.]+$/, "") + "_compressed.jpg",
                 });
                 break;
             }
 
-            // ── PNG lossless ──────────────────────────────────────────────
+            /* ── PNG lossless ────────────────────────────────────────── */
             case "image-png": {
                 result = await compressImagePNG(file);
 
@@ -159,511 +123,305 @@ async function handleCompress(file) {
                     storedHash:     result.compressedHash,
                     originalSize:   result.originalSize,
                     originalName:   file.name,
+                    compressedBlob: result.compressedBlob,
                 };
 
-                compressedFileBlob = result.compressedBlob;
-                compressedFileName = file.name.replace(/\.[^.]+$/, "") + "_compressed.png";
-
                 displayCompressionResult({
-                    type:           "Lossless — PNG",
+                    type:           "Lossless — PNG (DEFLATE via UPNG.js)",
                     originalSize:   result.originalSizeHR,
                     compressedSize: result.compressedSizeHR,
                     ratio:          result.ratio,
                     savings:        result.savings,
-                    extraLines:     [
-                        "SHA-256: " + result.compressedHash.slice(0, 20) + "…",
-                    ],
+                    hashInfo:       { label: "Compressed SHA-256", hash: result.compressedHash },
+                    compressedBlob: result.compressedBlob,
+                    downloadName:   file.name.replace(/\.[^.]+$/, "") + "_compressed.png",
                 });
                 break;
             }
 
-            // ── Video ─────────────────────────────────────────────────────
+            /* ── Video ───────────────────────────────────────────────── */
             case "video": {
-                result = await compressVideoLossy(
-                    file, 23, "medium",
-                    (msg)      => appendLog(msg),
-                    (progress) => updateSpinnerText("Encoding… " + Math.round(progress * 100) + "%")
-                );
+                const crf    = Number(options.videoCrf) || 23;
+                const preset = options.videoPreset      || "medium";
 
-                compressionSession = {
-                    category:            "video-lossy",
-                    originalSize:        result.originalSize,
-                    originalDurationRaw: result.originalDurationRaw,
-                    crfUsed:             result.crfUsed,
-                    originalName:        file.name,
-                };
-
-                compressedFileBlob = result.compressedBlob;
-                compressedFileName = file.name.replace(/\.[^.]+$/, "") + "_crf23.mp4";
-
-                displayCompressionResult({
-                    type:           "Lossy — H.264 CRF 23",
-                    originalSize:   result.originalSizeHR,
-                    compressedSize: result.compressedSizeHR,
-                    ratio:          result.ratio,
-                    savings:        result.savings,
-                    extraLines:     [
-                        "Original bitrate: "    + result.originalBitrate,
-                        "Compressed bitrate: "  + result.compressedBitrate,
-                        "Duration: "            + result.compressedDuration,
-                        "Dimensions: "          + result.compressedDimensions,
-                    ],
-                });
+                if (crf === 0) {
+                    result = await compressVideoLossless(file, (m) => showLog(m), (r) => showProgress("Encoding… " + Math.round(r*100) + "%"));
+                    compressionSession = { category: "video-lossless", storedHash: result.compressedHash, originalMetadata: result.originalMetadata, originalSize: result.originalSize, originalName: file.name, compressedBlob: result.compressedBlob };
+                    displayCompressionResult({ type: "Lossless — H.264 CRF 0", originalSize: result.originalSizeHR, compressedSize: result.compressedSizeHR, ratio: result.ratio, savings: result.savings, hashInfo: { label: "Compressed SHA-256", hash: result.compressedHash }, compressedBlob: result.compressedBlob, downloadName: file.name.replace(/\.[^.]+$/, "") + "_lossless.mp4" });
+                } else {
+                    result = await compressVideoLossy(file, crf, preset, (m) => showLog(m), (r) => showProgress("Encoding… " + Math.round(r*100) + "%"));
+                    compressionSession = { category: "video-lossy", originalSize: result.originalSize, originalDurationRaw: result.originalDurationRaw, crfUsed: result.crfUsed, originalName: file.name, compressedBlob: result.compressedBlob };
+                    displayCompressionResult({ type: "Lossy — H.264 CRF " + result.crfUsed, originalSize: result.originalSizeHR, compressedSize: result.compressedSizeHR, ratio: result.ratio, savings: result.savings, compressedBlob: result.compressedBlob, downloadName: file.name.replace(/\.[^.]+$/, "") + "_crf" + result.crfUsed + ".mp4" });
+                }
                 break;
             }
 
-            // ── Text ──────────────────────────────────────────────────────
+            /* ── Text ────────────────────────────────────────────────── */
             case "text": {
-                if (typeof compressText !== "function") {
-                    showError("Text compression module not loaded. Check that textcompression.js is included.");
-                    hideSpinner();
-                    return;
-                }
+                if (typeof compressText !== "function") { showError("Text compression module not loaded."); return; }
                 result = await compressText(file);
-
-                compressionSession = {
-                    category:       "text",
-                    storedHash:     result.compressedHash,
-                    originalSize:   result.originalSize,
-                    originalName:   file.name,
-                };
-
-                compressedFileBlob = result.compressedBlob;
-                compressedFileName = file.name + ".gz";
-
-                displayCompressionResult({
-                    type:           "Lossless — " + (result.format || "GZIP"),
-                    originalSize:   result.originalSizeHR,
-                    compressedSize: result.compressedSizeHR,
-                    ratio:          result.ratio,
-                    savings:        result.savings,
-                    extraLines:     [
-                        "SHA-256: " + (result.compressedHash || "").slice(0, 20) + "…",
-                    ],
-                });
+                compressionSession = { category: "text", storedHash: result.compressedHash, originalSize: result.originalSize, originalName: file.name, compressedBlob: result.compressedBlob };
+                displayCompressionResult({ type: "Lossless — " + (result.format || "GZIP"), originalSize: result.originalSizeHR, compressedSize: result.compressedSizeHR, ratio: result.ratio, savings: result.savings, hashInfo: { label: "Compressed SHA-256", hash: result.compressedHash }, compressedBlob: result.compressedBlob, downloadName: file.name + ".gz" });
                 break;
             }
 
-            // ── Audio ─────────────────────────────────────────────────────
+            /* ── Audio ───────────────────────────────────────────────── */
             case "audio": {
-                if (typeof compressAudio !== "function") {
-                    showError("Audio compression module not loaded. Check that audiocompression.js is included.");
-                    hideSpinner();
-                    return;
-                }
+                if (typeof compressAudio !== "function") { showError("Audio compression module not loaded."); return; }
                 result = await compressAudio(file);
-
-                compressionSession = {
-                    category:       "audio",
-                    originalSize:   result.originalSize,
-                    storedHash:     result.compressedHash || null,
-                    originalName:   file.name,
-                };
-
-                compressedFileBlob = result.compressedBlob;
-                compressedFileName = file.name.replace(/\.[^.]+$/, "") + (result.type === "lossless" ? ".flac" : ".mp3");
-
-                displayCompressionResult({
-                    type:           result.type === "lossless" ? "Lossless — FLAC" : "Lossy — MP3",
-                    originalSize:   result.originalSizeHR,
-                    compressedSize: result.compressedSizeHR,
-                    ratio:          result.ratio,
-                    savings:        result.savings,
-                    extraLines:     [],
-                });
+                compressionSession = { category: "audio", originalSize: result.originalSize, originalName: file.name, compressedBlob: result.compressedBlob, storedHash: result.compressedHash || null };
+                displayCompressionResult({ type: result.type === "lossless" ? "Lossless — FLAC" : "Lossy — MP3", originalSize: result.originalSizeHR, compressedSize: result.compressedSizeHR, ratio: result.ratio, savings: result.savings, compressedBlob: result.compressedBlob, downloadName: file.name.replace(/\.[^.]+$/, "") + (result.type === "lossless" ? ".flac" : ".mp3") });
                 break;
             }
         }
 
-    } catch (error) {
-        showError("Compression failed: " + error.message);
+    } catch (err) {
+        showError("Compression failed: " + err.message);
+        console.error(err);
     }
 
-    hideSpinner();
+    hideProgress();
 }
 
 
 /* ─────────────────────────────────────────────────────────────────────────────
-   SECTION 4 — DECOMPRESSION / VERIFICATION HANDLER
+   SECTION 4 — DECOMPRESSION ENTRY POINT
    ───────────────────────────────────────────────────────────────────────────── */
 
 /**
- * Main decompression entry point. Called when the user re-uploads the compressed file.
- * Requires compressionSession to be set from a previous handleCompress() call.
- *
- * @param {File} file - The compressed file re-uploaded by the user
- * @returns {Promise<void>}
+ * Main decompression/verify handler.
+ * @param {File} file - The re-uploaded compressed file
  */
 async function handleDecompress(file) {
     if (!compressionSession) {
-        showError(
-            "No compression session found. Please compress a file first. " +
-            "If you closed and reopened the extension, you will need to re-compress."
-        );
+        showError("No compression session. Please compress a file first.");
         return;
     }
 
-    showSpinner();
+    hideError();
+    showProgress("Verifying " + file.name + "…");
 
     try {
         let result;
-        const session = compressionSession;
+        const s = compressionSession;
 
-        switch (session.category) {
+        switch (s.category) {
 
-            // ── PNG lossless rebuild ──────────────────────────────────────
             case "image-png": {
-                result = await decompressPNG(file, session.storedHash, session.originalName);
-
-                displayVerificationResult({
-                    type:    "PNG — Lossless Rebuild",
-                    lines:   [
-                        result.status,
-                        "Stored hash:  " + session.storedHash.slice(0, 20) + "…",
-                        "Rebuilt hash: " + result.rebuiltHash.slice(0, 20) + "…",
-                    ],
-                    success:     result.isMatch,
-                    downloadBlob: result.downloadBlob,
-                    downloadName: result.downloadName,
-                });
+                result = await decompressPNG(file, s.storedHash, s.originalName);
+                displayDecompressionResult({ type: "PNG — Lossless Rebuild", isLossless: true, hashCheck: { stored: s.storedHash, rebuilt: result.rebuiltHash, match: result.isMatch }, status: result.status, fileSizeHR: result.fileSizeHR, downloadBlob: result.downloadBlob, downloadName: result.downloadName });
                 break;
             }
 
-            // ── JPEG lossy quality check ──────────────────────────────────
             case "image-jpeg": {
-                result = await decompressJPEG(
-                    file,
-                    session.originalPixels,
-                    session.originalSize,
-                    session.originalWidth,
-                    session.originalHeight,
-                    session.originalName
-                );
-
-                displayVerificationResult({
-                    type:  "JPEG — Lossy Quality Verification",
-                    lines: [
-                        "PSNR: "          + result.psnr,
-                        "SSIM: "          + result.ssim,
-                        "Space saved: "   + result.savings,
-                        "Ratio: "         + result.ratio,
-                    ],
-                    success:      true,
-                    downloadBlob: result.downloadBlob,
-                    downloadName: result.downloadName,
-                });
+                result = await decompressJPEG(file, s.originalPixels, s.originalSize, s.originalWidth, s.originalHeight, s.originalName);
+                displayDecompressionResult({ type: "JPEG — Lossy Quality Verification", isLossless: false, qualityMetrics: { psnr: result.psnr, ssim: result.ssim, psnrRating: result.psnrRating }, originalSize: result.originalSizeHR, compressedSize: result.compressedSizeHR, ratio: result.ratio, savings: result.savings, downloadBlob: result.downloadBlob, downloadName: result.downloadName });
                 break;
             }
 
-            // ── Video lossy bitrate check ─────────────────────────────────
-            case "video-lossy": {
-                result = await decompressVideoLossy(
-                    file,
-                    session.originalSize,
-                    session.originalDurationRaw,
-                    session.crfUsed,
-                    session.originalName
-                );
-
-                displayVerificationResult({
-                    type:  "Video — Bitrate Comparison (CRF " + session.crfUsed + ")",
-                    lines: [
-                        "Original bitrate:  " + result.originalBitrate,
-                        "Rebuilt bitrate:   " + result.rebuiltBitrate,
-                        "Bitrate reduction: " + result.bitrateReduction,
-                        "Space saved: "       + result.savings,
-                    ],
-                    success:      true,
-                    downloadBlob: result.downloadBlob,
-                    downloadName: result.downloadName,
-                });
-                break;
-            }
-
-            // ── Video lossless hash check ─────────────────────────────────
             case "video-lossless": {
-                result = await decompressVideoLossless(
-                    file,
-                    session.storedHash,
-                    session.originalMetadata,
-                    session.originalSize,
-                    session.originalName
-                );
-
-                displayVerificationResult({
-                    type:  "Video — Lossless Rebuild (CRF 0)",
-                    lines: [
-                        result.status,
-                        "Duration match: "    + (result.durationMatch    ? "✅ Yes" : "❌ No"),
-                        "Dimensions match: "  + (result.dimensionsMatch  ? "✅ Yes" : "❌ No"),
-                        "Hash match: "        + (result.hashMatch        ? "✅ Yes" : "❌ No"),
-                    ],
-                    success:      result.fullyVerified,
-                    downloadBlob: result.downloadBlob,
-                    downloadName: result.downloadName,
-                });
+                result = await decompressVideoLossless(file, s.storedHash, s.originalMetadata, s.originalSize, s.originalName);
+                displayDecompressionResult({ type: "Video — Lossless Rebuild (CRF 0)", isLossless: true, hashCheck: { stored: s.storedHash, rebuilt: result.rebuiltHash, match: result.hashMatch }, checks: result.checks, status: result.status, downloadBlob: result.downloadBlob, downloadName: result.downloadName });
                 break;
             }
 
-            // ── Text lossless rebuild ─────────────────────────────────────
+            case "video-lossy": {
+                result = await decompressVideoLossy(file, s.originalSize, s.originalDurationRaw, s.crfUsed, s.originalName);
+                displayDecompressionResult({ type: "Video — Lossy (CRF " + s.crfUsed + ")", isLossless: false, bitrateInfo: { original: result.originalBitrate, rebuilt: result.rebuiltBitrate, reduction: result.bitrateReduction, rating: result.bitrateRating }, ratio: result.ratio, savings: result.savings, downloadBlob: result.downloadBlob, downloadName: result.downloadName });
+                break;
+            }
+
             case "text": {
-                if (typeof decompressText !== "function") {
-                    showError("Text decompression module not loaded.");
-                    hideSpinner();
-                    return;
-                }
-                result = await decompressText(file, session.storedHash, session.originalName);
-
-                displayVerificationResult({
-                    type:  "Text — Lossless Rebuild",
-                    lines: [
-                        result.status,
-                        "Stored hash:  " + (session.storedHash || "").slice(0, 20) + "…",
-                        "Rebuilt hash: " + (result.rebuiltHash || "").slice(0, 20) + "…",
-                    ],
-                    success:      result.isMatch,
-                    downloadBlob: result.downloadBlob,
-                    downloadName: result.downloadName,
-                });
+                if (typeof decompressText !== "function") { showError("Text decompression module not loaded."); return; }
+                result = await decompressText(file, s.storedHash, s.originalName);
+                displayDecompressionResult({ type: "Text — Lossless Rebuild", isLossless: true, hashCheck: { stored: s.storedHash, rebuilt: result.rebuiltHash, match: result.isMatch }, status: result.status, downloadBlob: result.downloadBlob, downloadName: result.downloadName });
                 break;
             }
 
-            // ── Audio rebuild ─────────────────────────────────────────────
             case "audio": {
-                if (typeof decompressAudio !== "function") {
-                    showError("Audio decompression module not loaded.");
-                    hideSpinner();
-                    return;
-                }
-                result = await decompressAudio(file, session, session.originalName);
-
-                displayVerificationResult({
-                    type:         result.type || "Audio — Rebuild",
-                    lines:        [result.status || ""],
-                    success:      true,
-                    downloadBlob: result.downloadBlob,
-                    downloadName: result.downloadName,
-                });
+                if (typeof decompressAudio !== "function") { showError("Audio decompression module not loaded."); return; }
+                result = await decompressAudio(file, s, s.originalName);
+                displayDecompressionResult({ type: result.type || "Audio Rebuild", isLossless: result.isLossless || false, status: result.status, downloadBlob: result.downloadBlob, downloadName: result.downloadName });
                 break;
             }
 
             default:
-                showError("Unknown session type. Please re-compress the file.");
+                showError("Unknown session type. Please re-compress.");
         }
 
-    } catch (error) {
-        showError("Verification failed: " + error.message);
+    } catch (err) {
+        showError("Decompression failed: " + err.message);
+        console.error(err);
     }
 
-    hideSpinner();
+    hideProgress();
 }
 
 
 /* ─────────────────────────────────────────────────────────────────────────────
-   SECTION 5 — DOM DISPLAY FUNCTIONS
+   SECTION 5 — UI DISPLAY FUNCTIONS  (real DOM implementations)
    ───────────────────────────────────────────────────────────────────────────── */
 
 /**
- * Populates the file info section with the selected file's details.
+ * Displays compression metrics in the popup after a successful compression.
+ * Populates #metricsSection and wires the download button.
  *
- * @param {File} file - The file selected by the user
- * @returns {void}
- */
-function displayFileInfo(file) {
-    document.getElementById("fileName").textContent    = file.name;
-    document.getElementById("fileType").textContent    = file.type || "Unknown";
-    document.getElementById("originalSize").textContent = formatFileSizeDisplay(file.size);
-    document.getElementById("fileInfoSection").style.display = "block";
-}
-
-/**
- * Populates the compression metrics section with results.
- *
- * @param {Object} data
- * @param {string} data.type           - e.g. "Lossy — JPEG"
- * @param {string} data.originalSize   - Human-readable original size
- * @param {string} data.compressedSize - Human-readable compressed size
- * @param {string} data.ratio          - e.g. "3.21:1"
- * @param {string} data.savings        - e.g. "68.84%"
- * @param {string[]} data.extraLines   - Additional lines shown in the results box
- * @returns {void}
+ * @param {Object} data - Result from handleCompress()
  */
 function displayCompressionResult(data) {
-    document.getElementById("metricOriginal").textContent   = data.originalSize;
-    document.getElementById("metricCompressed").textContent = data.compressedSize;
-    document.getElementById("metricRatio").textContent      = data.ratio;
-    document.getElementById("metricSavings").textContent    = data.savings;
+    // Populate metrics grid
+    const el = (id) => document.getElementById(id);
 
-    // Show extra info (PSNR/SSIM, bitrate, hash preview) in the results box
-    const resultsBox = document.getElementById("resultsBox");
-    let extraHTML = `<div class="result-item result-success">
-        <span class="result-icon">✅</span>
-        <span class="result-text"><strong>${data.type}</strong> — compression complete</span>
-    </div>`;
+    el("metricOriginal").textContent   = data.originalSize   || "—";
+    el("metricCompressed").textContent = data.compressedSize || "—";
+    el("metricRatio").textContent      = data.ratio          || "—";
+    el("metricSavings").textContent    = data.savings        || "—";
 
-    if (data.extraLines && data.extraLines.length > 0) {
-        data.extraLines.forEach(line => {
-            extraHTML += `<div class="result-item">
-                <span class="result-icon">📊</span>
-                <span class="result-text">${line}</span>
-            </div>`;
-        });
+    // Extra metrics — PSNR/SSIM for JPEG, SHA-256 for PNG/text
+    const extras = el("metricExtras");
+    extras.innerHTML = "";
+
+    if (data.qualityMetrics) {
+        extras.innerHTML =
+            `<div class="quality-metrics">` +
+            `<p><strong>PSNR:</strong> ${data.qualityMetrics.psnr} &nbsp;|&nbsp; ` +
+            `<strong>SSIM:</strong> ${data.qualityMetrics.ssim}</p>` +
+            `<p class="quality-note">PSNR &gt;40 dB = excellent quality. SSIM closer to 1.0 = better.</p>` +
+            `</div>`;
     }
 
-    resultsBox.innerHTML = extraHTML;
+    if (data.hashInfo) {
+        extras.innerHTML =
+            `<div class="hash-display">` +
+            `<p><strong>${data.hashInfo.label}:</strong></p>` +
+            `<code class="hash-code">${data.hashInfo.hash}</code>` +
+            `</div>`;
+    }
 
-    document.getElementById("metricsSection").style.display      = "block";
-    document.getElementById("verificationSection").style.display = "block";
-    hideError();
+    // Wire download button
+    const dlBtn = el("downloadCompressed");
+    if (dlBtn && data.compressedBlob) {
+        dlBtn.onclick = () => downloadBlob(data.compressedBlob, data.downloadName);
+        dlBtn.textContent = "⬇️ Download " + data.downloadName;
+    }
+
+    // Show metrics section, hide others
+    el("metricsSection").style.display    = "block";
+    el("decompressSection").style.display = "none";
+    el("verificationSection").style.display = "none";
 }
 
 /**
- * Populates the verification results section after decompression/rebuild.
- * Also provides a download button for the rebuilt file.
+ * Displays decompression / rebuild verification results.
+ * Populates #verificationSection.
  *
- * @param {Object} data
- * @param {string}   data.type         - Verification type label
- * @param {string[]} data.lines        - Lines to display in the results box
- * @param {boolean}  data.success      - Whether verification passed
- * @param {Blob}     data.downloadBlob - File to offer for download
- * @param {string}   data.downloadName - Filename for download
- * @returns {void}
+ * @param {Object} data - Result from handleDecompress()
  */
-function displayVerificationResult(data) {
-    const resultsBox  = document.getElementById("resultsBox");
-    const statusClass = data.success ? "result-success" : "result-error";
-    const statusIcon  = data.success ? "✅" : "❌";
+function displayDecompressionResult(data) {
+    const resultsBox = document.getElementById("resultsBox");
+    if (!resultsBox) return;
 
-    let html = `<div class="result-item ${statusClass}">
-        <span class="result-icon">${statusIcon}</span>
-        <span class="result-text"><strong>${data.type}</strong></span>
-    </div>`;
+    let html = `<h3>${data.type}</h3>`;
 
-    data.lines.forEach(line => {
-        if (line) {
-            html += `<div class="result-item">
-                <span class="result-icon">📋</span>
-                <span class="result-text">${line}</span>
-            </div>`;
-        }
-    });
+    // Hash check (lossless files)
+    if (data.hashCheck) {
+        const icon = data.hashCheck.match ? "✅" : "❌";
+        html += `<div class="verify-status ${data.hashCheck.match ? "pass" : "fail"}">
+                    ${icon} ${data.status || (data.hashCheck.match ? "Hashes match — perfect rebuild." : "Hash mismatch.")}
+                 </div>`;
+        html += `<div class="hash-display">
+                    <p><strong>Stored&nbsp;&nbsp;:</strong> <code>${data.hashCheck.stored}</code></p>
+                    <p><strong>Rebuilt&nbsp;:</strong> <code>${data.hashCheck.rebuilt}</code></p>
+                 </div>`;
+    }
 
-    if (data.downloadBlob && data.downloadName) {
-        html += `<div style="margin-top:12px;">
-            <button class="btn btn-primary" id="downloadRebuilt">⬇️ Download Rebuilt File</button>
-        </div>`;
+    // Quality metrics (lossy images)
+    if (data.qualityMetrics) {
+        html += `<div class="quality-metrics">
+                    <p><strong>PSNR:</strong> ${data.qualityMetrics.psnr} — ${data.qualityMetrics.psnrRating}</p>
+                    <p><strong>SSIM:</strong> ${data.qualityMetrics.ssim}</p>
+                    <p><strong>Original:</strong> ${data.originalSize} &nbsp;→&nbsp; <strong>Compressed:</strong> ${data.compressedSize}</p>
+                    <p><strong>Ratio:</strong> ${data.ratio} &nbsp;|&nbsp; <strong>Saved:</strong> ${data.savings}</p>
+                 </div>`;
+    }
+
+    // Bitrate info (lossy video)
+    if (data.bitrateInfo) {
+        html += `<div class="quality-metrics">
+                    <p><strong>Original bitrate:</strong> ${data.bitrateInfo.original}</p>
+                    <p><strong>Compressed bitrate:</strong> ${data.bitrateInfo.rebuilt}</p>
+                    <p><strong>Bitrate reduction:</strong> ${data.bitrateInfo.reduction}</p>
+                    <p><strong>Rating:</strong> ${data.bitrateInfo.rating}</p>
+                 </div>`;
+    }
+
+    // Multi-check list (lossless video)
+    if (data.checks) {
+        html += `<ul class="check-list">${data.checks.map(c => `<li>${c}</li>`).join("")}</ul>`;
+    }
+
+    // Download button for decompressed file
+    if (data.downloadBlob) {
+        html += `<button class="btn btn-primary" id="downloadDecompressed" style="margin-top:12px">
+                    ⬇️ Download ${data.downloadName}
+                 </button>`;
     }
 
     resultsBox.innerHTML = html;
-    document.getElementById("verificationSection").style.display = "block";
 
-    if (data.downloadBlob && data.downloadName) {
-        document.getElementById("downloadRebuilt").addEventListener("click", () => {
-            triggerDownload(data.downloadBlob, data.downloadName);
-        });
+    // Wire download after HTML is set
+    const dlBtn = document.getElementById("downloadDecompressed");
+    if (dlBtn && data.downloadBlob) {
+        dlBtn.addEventListener("click", () => downloadBlob(data.downloadBlob, data.downloadName));
     }
+
+    document.getElementById("verificationSection").style.display = "block";
 }
 
 /**
- * Shows a user-facing error message in the popup (PDF Section 10.2).
- * Error is shown in the UI, not just the console.
+ * Shows an error message in #errorMessage (in popup, not just console).
+ * PDF Section 10.2: errors must appear in the UI.
  *
- * @param {string} message - Human-readable error description
- * @returns {void}
+ * @param {string} message
  */
 function showError(message) {
-    const errorEl = document.getElementById("errorMessage");
-    errorEl.textContent    = "⚠️ " + message;
-    errorEl.style.display  = "block";
-    hideSpinner();
+    const el = document.getElementById("errorMessage");
+    if (el) {
+        el.textContent    = "⚠ " + message;
+        el.style.display  = "block";
+    }
+    console.error("[Error]", message);
 }
 
-/**
- * Hides the error message banner.
- *
- * @returns {void}
- */
+/** Hides the error message box. */
 function hideError() {
-    const errorEl = document.getElementById("errorMessage");
-    errorEl.style.display = "none";
-    errorEl.textContent   = "";
+    const el = document.getElementById("errorMessage");
+    if (el) el.style.display = "none";
 }
 
 /**
- * Shows the loading spinner with an optional message.
- *
- * @param {string} [message] - Optional text to show under the spinner
- * @returns {void}
+ * Shows the loading spinner with a status message.
+ * @param {string} message
  */
-function showSpinner(message = "Processing file...") {
+function showProgress(message) {
     const spinner = document.getElementById("loadingSpinner");
-    const textEl  = spinner.querySelector("p");
-    if (textEl) textEl.textContent = message;
-    spinner.style.display = "flex";
+    const text    = document.getElementById("loadingText");
+    if (spinner) spinner.style.display = "flex";
+    if (text)    text.textContent      = message;
 }
 
-/**
- * Updates the spinner's status text during long operations like video encoding.
- *
- * @param {string} message - Progress message e.g. "Encoding… 42%"
- * @returns {void}
- */
-function updateSpinnerText(message) {
+/** Hides the loading spinner. */
+function hideProgress() {
     const spinner = document.getElementById("loadingSpinner");
-    const textEl  = spinner.querySelector("p");
-    if (textEl) textEl.textContent = message;
+    if (spinner) spinner.style.display = "none";
 }
 
 /**
- * Hides the loading spinner.
- *
- * @returns {void}
+ * Logs an ffmpeg processing message (optional developer panel).
+ * @param {string} message
  */
-function hideSpinner() {
-    document.getElementById("loadingSpinner").style.display = "none";
-}
-
-/**
- * Appends an ffmpeg log line to the browser console.
- * Not shown in the popup UI to keep it clean.
- *
- * @param {string} message - Log message from ffmpeg.wasm
- * @returns {void}
- */
-function appendLog(message) {
+function showLog(message) {
     console.log("[ffmpeg]", message);
-}
-
-/**
- * Returns a human-readable file size string from raw bytes.
- * Used for the file info section before compression.
- *
- * @param {number} bytes - File size in bytes
- * @returns {string} e.g. "2.31 MB"
- */
-function formatFileSizeDisplay(bytes) {
-    if (bytes < 1024)                  return bytes + " B";
-    if (bytes < 1024 * 1024)           return (bytes / 1024).toFixed(2) + " KB";
-    if (bytes < 1024 * 1024 * 1024)    return (bytes / (1024 * 1024)).toFixed(2) + " MB";
-    return (bytes / (1024 * 1024 * 1024)).toFixed(2) + " GB";
-}
-
-/**
- * Triggers a file download in the browser for a given Blob.
- *
- * @param {Blob} blob       - The file data to download
- * @param {string} filename - Filename shown in the save dialog
- * @returns {void}
- */
-function triggerDownload(blob, filename) {
-    const objectURL = URL.createObjectURL(blob);
-    const anchor    = document.createElement("a");
-    anchor.href     = objectURL;
-    anchor.download = filename;
-    document.body.appendChild(anchor);
-    anchor.click();
-    document.body.removeChild(anchor);
-    setTimeout(() => URL.revokeObjectURL(objectURL), 1000);
 }
 
 
@@ -673,81 +431,124 @@ function triggerDownload(blob, filename) {
 
 document.addEventListener("DOMContentLoaded", () => {
 
-    const fileInput    = document.getElementById("fileInput");
-    const uploadArea   = document.getElementById("uploadArea");
-    const reuploadArea = document.getElementById("reuploadArea");
-    const reuploadInput= document.getElementById("reuploadInput");
-    const downloadBtn  = document.getElementById("downloadCompressed");
-    const reuploadBtn  = document.getElementById("reuploadBtn");
+    const compressInput   = document.getElementById("compress-input");
+    const compressBtn     = document.getElementById("compress-btn");
+    const decompressInput = document.getElementById("decompress-input");
+    const decompressBtn   = document.getElementById("decompress-btn");
+    const reuploadBtn     = document.getElementById("reuploadBtn");
+    const uploadArea      = document.getElementById("uploadArea");
+    const reuploadArea    = document.getElementById("reuploadArea");
+    const qualitySlider   = document.getElementById("jpeg-quality");
+    const qualityVal      = document.getElementById("jpeg-quality-val");
+    const qualityRow      = document.getElementById("jpeg-quality-row");
 
-    // ── Click on upload area opens file picker ────────────────────────────
-    uploadArea.addEventListener("click", () => fileInput.click());
+    /* ── Click upload area to open file picker ─────────────────────── */
+    if (uploadArea && compressInput) {
+        uploadArea.addEventListener("click", () => compressInput.click());
+    }
 
-    // ── Drag and drop support ─────────────────────────────────────────────
-    uploadArea.addEventListener("dragover", (event) => {
-        event.preventDefault();
-        uploadArea.classList.add("drag-over");
-    });
+    if (reuploadArea && decompressInput) {
+        reuploadArea.addEventListener("click", () => decompressInput.click());
+    }
 
-    uploadArea.addEventListener("dragleave", () => {
-        uploadArea.classList.remove("drag-over");
-    });
+    /* ── Show file info when file is selected ──────────────────────── */
+    if (compressInput) {
+        compressInput.addEventListener("change", () => {
+            const file = compressInput.files[0];
+            if (!file) return;
 
-    uploadArea.addEventListener("drop", (event) => {
-        event.preventDefault();
-        uploadArea.classList.remove("drag-over");
-        const droppedFile = event.dataTransfer.files[0];
-        if (droppedFile) processSelectedFile(droppedFile);
-    });
+            const infoSection = document.getElementById("fileInfoSection");
+            if (infoSection) infoSection.style.display = "block";
 
-    // ── File picker change ────────────────────────────────────────────────
-    fileInput.addEventListener("change", () => {
-        if (fileInput.files && fileInput.files[0]) {
-            processSelectedFile(fileInput.files[0]);
-        }
-    });
+            const fnEl = document.getElementById("fileName");
+            const ftEl = document.getElementById("fileType");
+            const fsEl = document.getElementById("originalSize");
+            if (fnEl) fnEl.textContent = file.name;
+            if (ftEl) ftEl.textContent = file.type || "unknown";
+            if (fsEl) fsEl.textContent = formatBytes(file.size);
 
-    // ── Download compressed file ──────────────────────────────────────────
-    downloadBtn.addEventListener("click", () => {
-        if (compressedFileBlob) {
-            triggerDownload(compressedFileBlob, compressedFileName);
-        } else {
-            showError("No compressed file available. Please compress a file first.");
-        }
-    });
+            // Show correct slider based on file type
+            const category = detectFileCategory(file);
+            if (qualityRow) qualityRow.style.display = (category === "image-jpeg") ? "block" : "none";
+            const crfRow = document.getElementById("video-crf-row");
+            if (crfRow) crfRow.style.display = (category === "video") ? "block" : "none";
 
-    // ── Show decompression section ────────────────────────────────────────
-    reuploadBtn.addEventListener("click", () => {
-        document.getElementById("decompressSection").style.display = "block";
-    });
+            hideError();
+        });
+    }
 
-    // ── Click on re-upload area opens file picker ─────────────────────────
-    reuploadArea.addEventListener("click", () => reuploadInput.click());
+    /* ── JPEG quality slider live update ───────────────────────────── */
+    if (qualitySlider && qualityVal) {
+        qualitySlider.addEventListener("input", () => {
+            qualityVal.textContent = qualitySlider.value;
+        });
+    }
 
-    // ── Re-upload file selected → run verification ────────────────────────
-    reuploadInput.addEventListener("change", () => {
-        if (reuploadInput.files && reuploadInput.files[0]) {
-            handleDecompress(reuploadInput.files[0]);
-        }
-    });
+    /* ── Video CRF slider live update ──────────────────────────────── */
+    const crfSlider = document.getElementById("video-crf");
+    const crfVal    = document.getElementById("video-crf-val");
+    if (crfSlider && crfVal) {
+        crfSlider.addEventListener("input", () => {
+            crfVal.textContent = crfSlider.value;
+        });
+    }
+
+    /* ── Compress button ───────────────────────────────────────────── */
+    if (compressBtn) {
+        compressBtn.addEventListener("click", () => {
+            if (!compressInput || !compressInput.files || compressInput.files.length === 0) {
+                showError("Please select a file first.");
+                return;
+            }
+            const file    = compressInput.files[0];
+            const options = {
+                jpegQuality: qualitySlider ? Number(qualitySlider.value) : 75,
+                videoCrf:    document.getElementById("video-crf")    ? Number(document.getElementById("video-crf").value)    : 23,
+                videoPreset: document.getElementById("video-preset") ? document.getElementById("video-preset").value         : "medium",
+            };
+            handleCompress(file, options);
+        });
+    }
+
+    /* ── Re-upload button (reveal decompression section) ───────────── */
+    if (reuploadBtn) {
+        reuploadBtn.addEventListener("click", () => {
+            const decompressSection = document.getElementById("decompressSection");
+            if (decompressSection) decompressSection.style.display = "block";
+            decompressSection.scrollIntoView({ behavior: "smooth" });
+        });
+    }
+
+    /* ── Decompress/verify button ──────────────────────────────────── */
+    if (decompressBtn) {
+        decompressBtn.addEventListener("click", () => {
+            if (!decompressInput || !decompressInput.files || decompressInput.files.length === 0) {
+                showError("Please select the compressed file to verify.");
+                return;
+            }
+            handleDecompress(decompressInput.files[0]);
+        });
+    }
+
+    /* ── Drag and drop support ─────────────────────────────────────── */
+    if (uploadArea && compressInput) {
+        uploadArea.addEventListener("dragover", (e) => {
+            e.preventDefault();
+            uploadArea.classList.add("drag-over");
+        });
+        uploadArea.addEventListener("dragleave", () => {
+            uploadArea.classList.remove("drag-over");
+        });
+        uploadArea.addEventListener("drop", (e) => {
+            e.preventDefault();
+            uploadArea.classList.remove("drag-over");
+            if (e.dataTransfer.files.length > 0) {
+                // Assign dropped file to the input
+                const dt   = new DataTransfer();
+                dt.items.add(e.dataTransfer.files[0]);
+                compressInput.files = dt.files;
+                compressInput.dispatchEvent(new Event("change"));
+            }
+        });
+    }
 });
-
-/**
- * Processes a file selected by the user — shows info and runs compression.
- * Called from both the file picker and drag-and-drop handlers.
- *
- * @param {File} file - The file to process
- * @returns {void}
- */
-function processSelectedFile(file) {
-    hideError();
-
-    // Reset UI sections from any previous session
-    document.getElementById("metricsSection").style.display      = "none";
-    document.getElementById("decompressSection").style.display   = "none";
-    document.getElementById("verificationSection").style.display = "none";
-    document.getElementById("resultsBox").innerHTML              = "";
-
-    displayFileInfo(file);
-    handleCompress(file);
-}
