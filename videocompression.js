@@ -51,9 +51,9 @@ async function getFFmpegInstance(onLog = null, onProgress = null) {
         );
     }
 
-    // FIX: use CDN directly — avoids all local file issues (corrupt wasm, wrong build, path problems)
-    // @ffmpeg/core-st = single-threaded build, no SharedArrayBuffer needed
-    const corePath = "https://unpkg.com/@ffmpeg/core-st@0.11.0/dist/ffmpeg-core.js";
+    // Use local ST build fetched via npm install @ffmpeg/core-st@0.11.0
+    const pageBase = window.location.href.replace(/\/[^\/]*$/, "");
+    const corePath = pageBase + "/lib/ffmpeg-core.js";
 
     ffmpegInstance = FFmpeg.createFFmpeg({
         corePath,
