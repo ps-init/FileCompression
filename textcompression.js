@@ -1,123 +1,115 @@
-// textcompression.js
-// Handles text file (.txt, .csv) compression and decompression
-// Uses fflate (GZIP) for lossless compression
-// Uses SubtleCrypto (built into Chrome) for SHA-256 hash verification
-
-// Stores the uploaded file's raw data so all functions can access it
-let originalFileData = null;
-let originalFileName = "";
-
 /**
- * Runs when the user picks a .txt or .csv file.
- * Reads the file into memory as raw bytes.
+ * textcompression.js
+ *
+ * Handles .txt and .csv file compression and decompression using pako GZIP.
+ * Lossless — perfect rebuild guaranteed via SHA-256 verification.
+ *
+ * Exports: compressText(file), decompressText(file, storedHash, originalName)
+ * Dependency: pako (global, loaded in index.html)
+ * PDF references: Section 4.1, 6.1, 6.2, 6.4
  */
-function handleFileUpload(event) {
-  const file = event.target.files[0];
-  if (!file) return;
 
-  originalFileName = file.name;
+"use strict";
 
-  const reader = new FileReader();
+/* ─────────────────────────────────────────────────────────────────────────────
+   SECTION 1 — UTILITIES
+   ───────────────────────────────────────────────────────────────────────────── */
 
-  reader.onload = function(e) {
-    originalFileData = new Uint8Array(e.target.result);
-    document.getElementById("status").textContent = "File loaded: " + originalFileName;
-  };
+function _textFormatBytes(bytes) {
+    if (bytes < 1024)    return bytes + " B";
+    if (bytes < 1048576) return (bytes / 1024).toFixed(2) + " KB";
+    return (bytes / 1048576).toFixed(2) + " MB";
+}
+function _textRatio(o, c) { return c === 0 ? "∞:1" : (o / c).toFixed(2) + ":1"; }
+function _textSavings(o, c) { return (((o - c) / o) * 100).toFixed(2) + "%"; }
 
-  reader.readAsArrayBuffer(file);
+async function _textSHA256(buffer) {
+    const hash = await crypto.subtle.digest("SHA-256", buffer);
+    return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, "0")).join("");
 }
 
-/**
- * Runs when the user clicks the Compress button.
- * Compresses the file using GZIP and triggers a download.
- */
-function compressFile() {
-  if (!originalFileData) {
-    document.getElementById("status").textContent = "Error: Please upload a file first.";
-    return;
-  }
-
-  // fflate.gzipSync does the compression — level 9 = maximum compression
-  const compressed = fflate.gzipSync(originalFileData, { level: 9 });
-
-  const originalSize   = originalFileData.length;
-  const compressedSize = compressed.length;
-  const ratio          = (originalSize / compressedSize).toFixed(2);
-  const saving         = (((originalSize - compressedSize) / originalSize) * 100).toFixed(1);
-
-  // Display stats in the popup UI
-  document.getElementById("originalSize").textContent   = originalSize + " bytes";
-  document.getElementById("compressedSize").textContent = compressedSize + " bytes";
-  document.getElementById("ratio").textContent          = ratio + ":1";
-  document.getElementById("saving").textContent         = saving + "%";
-  document.getElementById("status").textContent         = "Compression complete!";
-
-  // Download the compressed file — .gz is added to signal it's compressed
-  downloadFile(compressed, originalFileName + ".gz");
-}
+/* ─────────────────────────────────────────────────────────────────────────────
+   SECTION 2 — COMPRESSION
+   ───────────────────────────────────────────────────────────────────────────── */
 
 /**
- * Runs when the user uploads a .gz file to decompress.
- * Restores the original file and verifies it using SHA-256 hash comparison.
+ * Compresses a .txt or .csv file with GZIP (level 9) via pako.
+ * SHA-256 of the ORIGINAL is stored so decompression can verify perfect rebuild.
+ *
+ * @param {File} file
+ * @returns {Promise<Object>}
  */
-async function handleDecompressUpload(event) {
-  const file = event.target.files[0];
-  if (!file) return;
-
-  const reader = new FileReader();
-
-  reader.onload = async function(e) {
-    const compressedData = new Uint8Array(e.target.result);
-
-    // fflate.decompressSync reverses the compression
-    const decompressed = fflate.decompressSync(compressedData);
-
-    // Compute SHA-256 fingerprint of both files
-    const originalHash = await computeHash(originalFileData);
-    const rebuiltHash  = await computeHash(decompressed);
-
-    // Show both hashes in the UI
-    document.getElementById("originalHash").textContent = originalHash;
-    document.getElementById("rebuiltHash").textContent  = rebuiltHash;
-
-    // Compare — identical hashes = perfect lossless rebuild
-    if (originalHash === rebuiltHash) {
-      document.getElementById("verifyResult").textContent = "✓ Perfect match — lossless rebuild confirmed";
-      document.getElementById("verifyResult").style.color = "green";
-    } else {
-      document.getElementById("verifyResult").textContent = "✗ Mismatch — something went wrong";
-      document.getElementById("verifyResult").style.color = "red";
+async function compressText(file) {
+    if (typeof pako === "undefined") {
+        throw new Error("pako is not loaded. Cannot compress text file.");
     }
 
-    // Download the restored file with its original name
-    const restoredName = file.name.replace(".gz", "");
-    downloadFile(decompressed, restoredName);
-  };
+    const buffer       = await file.arrayBuffer();
+    const originalSize = file.size;
+    const originalHash = await _textSHA256(buffer);   // hash of ORIGINAL for rebuild check
 
-  reader.readAsArrayBuffer(file);
+    const compressed     = pako.gzip(new Uint8Array(buffer), { level: 9 });
+    const compressedBlob = new Blob([compressed], { type: "application/gzip" });
+    const compressedSize = compressedBlob.size;
+
+    return {
+        format:           "GZIP (pako level 9)",
+        type:             "lossless",
+        originalSize,
+        compressedSize,
+        originalSizeHR:   _textFormatBytes(originalSize),
+        compressedSizeHR: _textFormatBytes(compressedSize),
+        ratio:            _textRatio(originalSize, compressedSize),
+        savings:          _textSavings(originalSize, compressedSize),
+        compressedBlob,
+        compressedHash:   originalHash,  // stored for decompression verification
+    };
 }
 
-/**
- * Computes a SHA-256 hash of any file data.
- * Returns a readable hex string like "a3f2bc..."
- * SubtleCrypto is built into Chrome — no library needed.
- */
-async function computeHash(data) {
-  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
-  const hashArray  = Array.from(new Uint8Array(hashBuffer));
-  return hashArray.map(b => b.toString(16).padStart(2, "0")).join("");
-}
+/* ─────────────────────────────────────────────────────────────────────────────
+   SECTION 3 — DECOMPRESSION
+   ───────────────────────────────────────────────────────────────────────────── */
 
 /**
- * Creates a temporary download link and clicks it automatically.
- * Used by both compress and decompress to deliver the output file.
+ * Decompresses a .gz text file and verifies rebuild via SHA-256.
+ * Decompressed file is byte-for-byte identical to the original.
+ *
+ * @param {File}   file         - The .gz file to decompress
+ * @param {string} storedHash   - SHA-256 of the original file (from compressText)
+ * @param {string} originalName - Original filename for naming the download
+ * @returns {Promise<Object>}
  */
-function downloadFile(data, filename) {
-  const blob = new Blob([data]);
-  const url  = URL.createObjectURL(blob);
-  const a    = document.createElement("a");
-  a.href     = url;
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(url);
+async function decompressText(file, storedHash, originalName = "file") {
+    if (typeof pako === "undefined") {
+        throw new Error("pako is not loaded. Cannot decompress text file.");
+    }
+
+    const buffer = await file.arrayBuffer();
+    let decompressed;
+
+    try {
+        decompressed = pako.ungzip(new Uint8Array(buffer));
+    } catch (e) {
+        throw new Error("GZIP decompression failed — file may be corrupted. Detail: " + e.message);
+    }
+
+    const rebuiltHash = await _textSHA256(decompressed.buffer);
+    const isMatch     = storedHash ? rebuiltHash === storedHash : false;
+
+    const baseName    = originalName.replace(/\.[^.]+$/, "");
+    const origExt     = originalName.match(/\.[^.]+$/)?.[0] || ".txt";
+    const downloadName = baseName + "_decompressed" + origExt;
+
+    return {
+        rebuiltHash,
+        storedHash,
+        isMatch,
+        status: isMatch
+            ? "✅ Perfect rebuild — SHA-256 hashes match. File is byte-for-byte identical to original."
+            : storedHash
+                ? "❌ Hash mismatch — the file may have been modified or corrupted."
+                : "⚠️ No stored hash available. Compress the file again in this session to verify.",
+        downloadBlob: new Blob([decompressed], { type: "text/plain" }),
+        downloadName,
+    };
 }

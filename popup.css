@@ -8,25 +8,44 @@ body {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
     background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
     color: #333;
+    margin: 0;
+    padding: 0;
 
-    width: 100%;
-    min-height: 100vh;
-
-    display: flex;
-    justify-content: center;   /* horizontal center */
-    align-items: center;       /* vertical center */
+    /* Fixed width for Chrome extension popup */
+    width: 520px;
+    min-width: 520px;
+    min-height: 400px;
 }
 
 .container {
-    width: 100%;
-    max-width: 500px;
+    width: 520px;
+    min-width: 520px;
     background: #fff;
-    border-radius: 12px;
-    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+    border-radius: 0;
+    box-shadow: none;
     overflow: hidden;
-    display: flex;  
+    display: flex;
     flex-direction: column;
     min-height: 100vh;
+}
+
+/* When running as full browser page (Live Server), center the container */
+@media (min-width: 600px) {
+    body {
+        width: 100%;
+        min-width: unset;
+        display: flex;
+        justify-content: center;
+        align-items: flex-start;
+        padding: 20px 0;
+    }
+    .container {
+        width: 520px;
+        min-width: 520px;
+        border-radius: 12px;
+        box-shadow: 0 10px 40px rgba(0, 0, 0, 0.2);
+        min-height: unset;
+    }
 }
 
 /* Header */

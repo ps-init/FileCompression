@@ -108,24 +108,11 @@ async function decompressJPEG(reuploadedFile, originalPixels, originalSize, orig
     const psnrRating    = ratePSNR(psnrValue);
 
     // Export decoded pixels as a PNG blob so the user can download them
-    const canvas  = document.createElement("canvas");
-    canvas.width  = decoded.width;
-    canvas.height = decoded.height;
-    const context = canvas.getContext("2d");
-    context.putImageData(
-        new ImageData(new Uint8ClampedArray(rebuiltPixels.buffer), decoded.width, decoded.height),
-        0, 0
-    );
-
-    const downloadBlob = await new Promise((resolve, reject) => {
-        canvas.toBlob(
-            (blob) => blob ? resolve(blob) : reject(new Error("canvas.toBlob failed.")),
-            "image/png"
-        );
-    });
-
+    // Download the compressed JPEG itself (lossy — original pixels are recovered visually)
+    // Decoding back to PNG would change format; returning JPEG preserves original format.
+    const downloadBlob = new Blob([await reuploadedFile.arrayBuffer()], { type: "image/jpeg" });
     const baseName     = originalName.replace(/\.[^.]+$/, "");
-    const downloadName = baseName + "_decompressed.png";
+    const downloadName = baseName + "_decompressed.jpg";
 
     return {
         psnr:             psnrValue,
