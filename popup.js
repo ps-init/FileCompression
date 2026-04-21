@@ -145,13 +145,15 @@ async function handleCompress(file, options = {}) {
                 const preset = options.videoPreset      || "medium";
 
                 if (crf === 0) {
-                    result = await compressVideoLossless(file, (m) => showLog(m), (r) => showProgress("Encoding… " + Math.round(r*100) + "%"));
+                    // LOSSLESS: GZIP via pako — output is .mp4.gz
+                    result = await compressVideoLossless(file, (m) => showLog(m), (r) => showProgress("Compressing… " + Math.round(r*100) + "%"));
                     compressionSession = { category: "video-lossless", storedHash: result.compressedHash, originalMetadata: result.originalMetadata, originalSize: result.originalSize, originalName: file.name, compressedBlob: result.compressedBlob };
-                    displayCompressionResult({ type: "Lossless — H.264 CRF 0", originalSize: result.originalSizeHR, compressedSize: result.compressedSizeHR, ratio: result.ratio, savings: result.savings, hashInfo: { label: "Compressed SHA-256", hash: result.compressedHash }, compressedBlob: result.compressedBlob, downloadName: file.name.replace(/\.[^.]+$/, "") + "_lossless.mp4" });
+                    displayCompressionResult({ type: "Lossless — GZIP via pako", originalSize: result.originalSizeHR, compressedSize: result.compressedSizeHR, ratio: result.ratio, savings: result.savings, hashInfo: { label: "Original SHA-256 (verify rebuild)", hash: result.compressedHash }, compressedBlob: result.compressedBlob, downloadName: file.name.replace(/\.[^.]+$/, "") + "_lossless.mp4.gz" });
                 } else {
+                    // LOSSY: MediaRecorder → VP9/WebM — output is .webm
                     result = await compressVideoLossy(file, crf, preset, (m) => showLog(m), (r) => showProgress("Encoding… " + Math.round(r*100) + "%"));
                     compressionSession = { category: "video-lossy", originalSize: result.originalSize, originalDurationRaw: result.originalDurationRaw, crfUsed: result.crfUsed, originalName: file.name, compressedBlob: result.compressedBlob };
-                    displayCompressionResult({ type: "Lossy — H.264 CRF " + result.crfUsed, originalSize: result.originalSizeHR, compressedSize: result.compressedSizeHR, ratio: result.ratio, savings: result.savings, compressedBlob: result.compressedBlob, downloadName: file.name.replace(/\.[^.]+$/, "") + "_crf" + result.crfUsed + ".mp4" });
+                    displayCompressionResult({ type: "Lossy — VP9/WebM (MediaRecorder, CRF " + result.crfUsed + ")", originalSize: result.originalSizeHR, compressedSize: result.compressedSizeHR, ratio: result.ratio, savings: result.savings, compressedBlob: result.compressedBlob, downloadName: file.name.replace(/\.[^.]+$/, "") + "_crf" + result.crfUsed + ".webm" });
                 }
                 break;
             }
@@ -169,8 +171,12 @@ async function handleCompress(file, options = {}) {
             case "audio": {
                 if (typeof compressAudio !== "function") { showError("Audio compression module not loaded."); return; }
                 result = await compressAudio(file);
-                compressionSession = { category: "audio", originalSize: result.originalSize, originalName: file.name, compressedBlob: result.compressedBlob, storedHash: result.compressedHash || null };
-                displayCompressionResult({ type: result.type === "lossless" ? "Lossless — FLAC" : "Lossy — MP3", originalSize: result.originalSizeHR, compressedSize: result.compressedSizeHR, ratio: result.ratio, savings: result.savings, compressedBlob: result.compressedBlob, downloadName: file.name.replace(/\.[^.]+$/, "") + (result.type === "lossless" ? ".flac" : ".mp3") });
+                compressionSession = { category: "audio", originalSize: result.originalSize, originalName: file.name, compressedBlob: result.compressedBlob, compressedHash: result.compressedHash || null, audioType: result.type, extension: result.extension };
+                const audioLabel = result.type === "lossless" ? "Lossless — WAV compressed with GZIP (pako)" : "Lossy — MP3 compressed with GZIP (pako)";
+                const audioExtra = result.type === "lossless"
+                    ? { hashInfo: { label: "Original SHA-256 (verify rebuild)", hash: result.compressedHash } }
+                    : { bitrateInfo: { original: result.bitrateOriginal, rebuilt: result.bitrateGzipped, reduction: "N/A — GZIP wrapper is lossless", rating: "Quality set at original MP3 encoding" } };
+                displayCompressionResult({ type: audioLabel, originalSize: result.originalSizeHR, compressedSize: result.compressedSizeHR, ratio: result.ratio, savings: result.savings, compressedBlob: result.compressedBlob, downloadName: result.outputName, ...audioExtra });
                 break;
             }
         }
@@ -241,7 +247,7 @@ async function handleDecompress(file) {
             case "audio": {
                 if (typeof decompressAudio !== "function") { showError("Audio decompression module not loaded."); return; }
                 result = await decompressAudio(file, s, s.originalName);
-                displayDecompressionResult({ type: result.type || "Audio Rebuild", isLossless: result.isLossless || false, status: result.status, downloadBlob: result.downloadBlob, downloadName: result.downloadName });
+                displayDecompressionResult({ type: result.type || "Audio Rebuild", isLossless: result.isLossless || false, status: result.status, hashCheck: result.hashCheck || null, downloadBlob: result.downloadBlob, downloadName: result.downloadName });
                 break;
             }
 

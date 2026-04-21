@@ -16,8 +16,6 @@
     "web_accessible_resources": [
         {
             "resources": [
-                "lib/ffmpeg-core.js",
-                "lib/ffmpeg-core.wasm",
                 "upng.js"
             ],
             "matches": ["<all_urls>"]
