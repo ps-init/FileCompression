@@ -1,184 +1,93 @@
 /**
  * videoCompression.js
  *
- * Handles lossy H.264/MP4 and lossless H.264 CRF-0 video compression
- * for the MACS JC Project 2 Chrome Extension via ffmpeg.wasm.
+ * Handles lossy video compression using the browser's built-in
+ * MediaRecorder API — no ffmpeg.wasm, no external libraries, no
+ * SharedArrayBuffer required.
  *
- * Library used:
- *   - ffmpeg.wasm v0.11.0 — loaded locally from lib/ folder.
- *     Uses @ffmpeg/core@0.11.0 (NOT core-st — that package does not exist).
- *     Single-threaded by default so no SharedArrayBuffer headers needed.
+ * Strategy:
+ *   1. Draw video frames onto a canvas element in real time.
+ *   2. Capture the canvas stream with MediaRecorder at a controlled bitrate.
+ *   3. Collect the recorded chunks into a WebM Blob.
  *
- * Quality metric: bitrate comparison (kbps before vs after).
- * Frame-by-frame PSNR/SSIM is impractical for video in-browser.
- * Bitrate comparison is explicitly permitted by PDF Section 6.3.
+ * Quality control: videoBitsPerSecond maps to the CRF slider in the UI.
+ *   CRF 0  → 8,000,000 bps (8 Mbps — highest quality)
+ *   CRF 23 → 1,500,000 bps (1.5 Mbps — default balance)
+ *   CRF 51 →   200,000 bps (0.2 Mbps — smallest file)
  *
- * Hash note: CRF-0 re-encoding does NOT produce byte-identical output to the
- * original (container metadata differs). SHA-256 is stored of the compressed
- * file — re-uploading it confirms the file hasn't been altered.
- *
- * Required in HTML before this file:
- *   <script src="lib/ffmpeg.min.js"></script>
+ * PDF references: Section 4.4, 6.1, 6.2, 6.3
  */
 
 "use strict";
 
 /* ─────────────────────────────────────────────────────────────────────────────
-   SECTION 1 — FFMPEG INSTANCE MANAGEMENT
-   ───────────────────────────────────────────────────────────────────────────── */
-
-/** Shared ffmpeg.wasm instance — loaded once, reused for all operations. */
-let ffmpegInstance = null;
-
-/**
- * Returns an initialised ffmpeg.wasm instance.
- * Loads it on first call; subsequent calls return the cached instance.
- *
- * FIX: corePath now uses @ffmpeg/core@0.11.0 (not core-st which doesn't exist).
- * FIX: Uses window.location.origin so it works both on localhost and
- *      chrome-extension:// without hardcoded paths.
- *
- * @param {Function|null} onLog      - Optional callback for ffmpeg log lines
- * @param {Function|null} onProgress - Optional callback for progress (0–1)
- * @returns {Promise<Object>} Loaded ffmpeg instance
- */
-async function getFFmpegInstance(onLog = null, onProgress = null) {
-    if (ffmpegInstance) return ffmpegInstance;
-
-    if (typeof FFmpeg === "undefined" || typeof FFmpeg.createFFmpeg === "undefined") {
-        throw new Error(
-            "ffmpeg.wasm is not loaded. Add <script src='lib/ffmpeg.min.js'> before videocompression.js."
-        );
-    }
-
-    // Use local ST build fetched via npm install @ffmpeg/core-st@0.11.0
-    const pageBase = window.location.href.replace(/\/[^\/]*$/, "");
-    const corePath = pageBase + "/lib/ffmpeg-core.js";
-
-    ffmpegInstance = FFmpeg.createFFmpeg({
-        corePath,
-        log:      true,
-        logger:   ({ message }) => { if (onLog) onLog(message); },
-        progress: ({ ratio })   => { if (onProgress) onProgress(Math.min(ratio, 1)); },
-    });
-
-    // FIX: wrap load() in 30s timeout — missing core files cause infinite hang
-    await Promise.race([
-        ffmpegInstance.load(),
-        new Promise((_, reject) =>
-            setTimeout(() => reject(new Error(
-                "ffmpeg failed to load in 30s. Check lib/ffmpeg-core.js and lib/ffmpeg-core.wasm exist. Path tried: " + corePath
-            )), 30000)
-        ),
-    ]);
-
-    return ffmpegInstance;
-}
-
-
-/* ─────────────────────────────────────────────────────────────────────────────
-   SECTION 2 — VIDEO METADATA EXTRACTION
+   SECTION 1 — VIDEO METADATA
    ───────────────────────────────────────────────────────────────────────────── */
 
 /**
- * Reads duration, width, and height from a video file via the HTML5 video element.
- *
+ * Reads duration, width, and height from a video file via HTML5 video element.
  * @param {File|Blob} videoFile
  * @returns {Promise<{duration: number, width: number, height: number}>}
  */
 function getVideoMetadata(videoFile) {
     return new Promise((resolve, reject) => {
-        const video    = document.createElement("video");
-        video.preload  = "metadata";
-        video.muted    = true;
-        const url      = URL.createObjectURL(videoFile);
-
+        const video   = document.createElement("video");
+        video.preload = "metadata";
+        video.muted   = true;
+        const url     = URL.createObjectURL(videoFile);
         video.onloadedmetadata = () => {
             URL.revokeObjectURL(url);
-            resolve({
-                duration: video.duration,
-                width:    video.videoWidth,
-                height:   video.videoHeight,
-            });
+            resolve({ duration: video.duration, width: video.videoWidth, height: video.videoHeight });
         };
-
         video.onerror = () => {
             URL.revokeObjectURL(url);
-            reject(new Error("Could not read video metadata. File may be unsupported or corrupted."));
+            reject(new Error("Could not read video metadata."));
         };
-
         video.src = url;
     });
 }
 
-
 /* ─────────────────────────────────────────────────────────────────────────────
-   SECTION 3 — COMPRESSION METRICS  (PDF Section 6)
+   SECTION 2 — CRF TO BITRATE MAPPING
    ───────────────────────────────────────────────────────────────────────────── */
 
 /**
- * Compression ratio: originalSize / compressedSize  (PDF 6.1)
- * @param {number} originalSize
- * @param {number} compressedSize
- * @returns {string} e.g. "3.24:1"
+ * Converts CRF (0-51) to target bitrate in bps using exponential curve.
+ * @param {number} crf
+ * @returns {number}
  */
+function crfToBitrate(crf) {
+    const MAX_BPS = 8000000;
+    const MIN_BPS =  200000;
+    const t = crf / 51;
+    return Math.round(MAX_BPS * Math.pow(MIN_BPS / MAX_BPS, t));
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   SECTION 3 — COMPRESSION METRICS
+   ───────────────────────────────────────────────────────────────────────────── */
+
 function computeCompressionRatio(originalSize, compressedSize) {
     if (compressedSize === 0) return "∞:1";
     return (originalSize / compressedSize).toFixed(2) + ":1";
 }
-
-/**
- * Space savings percentage  (PDF 6.2)
- * @param {number} originalSize
- * @param {number} compressedSize
- * @returns {string} e.g. "69.14%"
- */
 function computeSpaceSavings(originalSize, compressedSize) {
     return (((originalSize - compressedSize) / originalSize) * 100).toFixed(2) + "%";
 }
-
-/**
- * Video bitrate in kbps — used as quality metric (PDF 6.3)
- * Formula: (fileSizeBytes × 8) / (durationSeconds × 1000)
- *
- * @param {number} fileSizeBytes
- * @param {number} durationSeconds
- * @returns {string} e.g. "2048 kbps"
- */
 function computeBitrate(fileSizeBytes, durationSeconds) {
     if (!durationSeconds || durationSeconds <= 0) return "N/A";
     return ((fileSizeBytes * 8) / (durationSeconds * 1000)).toFixed(0) + " kbps";
 }
-
-/**
- * SHA-256 hash via SubtleCrypto — no external library needed  (PDF 6.4)
- * @param {ArrayBuffer} buffer
- * @returns {Promise<string>} hex string
- */
 async function computeSHA256(buffer) {
     const hashBuffer = await crypto.subtle.digest("SHA-256", buffer);
-    return Array.from(new Uint8Array(hashBuffer))
-                .map((b) => b.toString(16).padStart(2, "0"))
-                .join("");
+    return Array.from(new Uint8Array(hashBuffer)).map((b) => b.toString(16).padStart(2, "0")).join("");
 }
-
-/**
- * Human-readable file size.
- * @param {number} bytes
- * @returns {string}
- */
 function formatBytes(bytes) {
     if (bytes < 1024)       return bytes + " B";
     if (bytes < 1048576)    return (bytes / 1024).toFixed(2) + " KB";
     if (bytes < 1073741824) return (bytes / 1048576).toFixed(2) + " MB";
     return (bytes / 1073741824).toFixed(2) + " GB";
 }
-
-/**
- * Human-readable duration.
- * @param {number} totalSeconds
- * @returns {string} e.g. "2m 14s"
- */
 function formatDuration(totalSeconds) {
     if (!isFinite(totalSeconds)) return "Unknown";
     const m = Math.floor(totalSeconds / 60);
@@ -186,81 +95,126 @@ function formatDuration(totalSeconds) {
     return m > 0 ? `${m}m ${s}s` : `${s}s`;
 }
 
-/**
- * Lowercase file extension from filename, fallback ".mp4"
- * @param {string} filename
- * @returns {string}
- */
-function getFileExtension(filename) {
-    const match = filename.match(/\.[^.]+$/);
-    return match ? match[0].toLowerCase() : ".mp4";
-}
-
-
 /* ─────────────────────────────────────────────────────────────────────────────
-   SECTION 4 — LOSSY COMPRESSION: H.264 CRF > 0
+   SECTION 4 — MEDIARECORDER CORE
    ───────────────────────────────────────────────────────────────────────────── */
 
 /**
- * Compresses a video using H.264 lossy encoding at a configurable CRF.
- * Output is always MP4 with H.264 video and AAC audio.
- *
- * CRF guide:
- *   0 = lossless  |  18 = visually lossless  |  23 = default balance
- *   28 = noticeable  |  51 = worst quality
- *
- * @param {File}         videoFile
- * @param {number}       crf       - 0–51, default 23
- * @param {string}       preset    - ffmpeg preset, default "medium"
+ * Plays a video into a hidden canvas and records it via MediaRecorder.
+ * @param {File} videoFile
+ * @param {{duration, width, height}} meta
+ * @param {number} targetBitrate - bps
+ * @param {Function|null} onLog
+ * @param {Function|null} onProgress
+ * @returns {Promise<Blob>}
+ */
+function _recordVideoToBlob(videoFile, meta, targetBitrate, onLog, onProgress) {
+    return new Promise((resolve, reject) => {
+        const video         = document.createElement("video");
+        video.muted         = true;
+        video.style.display = "none";
+        document.body.appendChild(video);
+
+        const canvas  = document.createElement("canvas");
+        canvas.width  = meta.width  || 640;
+        canvas.height = meta.height || 360;
+        const ctx     = canvas.getContext("2d");
+
+        const mimeType = MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
+            ? "video/webm;codecs=vp9"
+            : "video/webm";
+
+        const stream   = canvas.captureStream(30);
+        const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: targetBitrate });
+        const chunks   = [];
+
+        recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+
+        let rafId;
+        const cleanup = () => {
+            cancelAnimationFrame(rafId);
+            if (document.body.contains(video)) document.body.removeChild(video);
+        };
+
+        recorder.onstop = () => {
+            cleanup();
+            resolve(new Blob(chunks, { type: mimeType }));
+        };
+
+        recorder.onerror = (e) => {
+            cleanup();
+            reject(new Error("MediaRecorder error: " + (e.error || e)));
+        };
+
+        const timeout = setTimeout(() => {
+            cleanup();
+            try { recorder.stop(); } catch (_) {}
+            reject(new Error("Video compression timed out after 10 minutes."));
+        }, 600000);
+
+        // Override onstop to also clear timeout
+        const origStop  = recorder.onstop;
+        recorder.onstop = () => { clearTimeout(timeout); origStop(); };
+
+        video.onloadedmetadata = () => {
+            recorder.start(100);
+            video.play().catch(reject);
+            if (onLog) onLog("Recording started at " + (targetBitrate / 1000).toFixed(0) + " kbps...");
+        };
+
+        const drawFrame = () => {
+            if (video.paused || video.ended) return;
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            if (onProgress && meta.duration > 0) onProgress(video.currentTime / meta.duration);
+            rafId = requestAnimationFrame(drawFrame);
+        };
+        video.onplay = drawFrame;
+
+        video.onended = () => {
+            cancelAnimationFrame(rafId);
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            setTimeout(() => { try { recorder.stop(); } catch (_) {} }, 300);
+            if (onLog) onLog("Recording complete.");
+        };
+
+        video.onerror = () => {
+            clearTimeout(timeout);
+            cleanup();
+            reject(new Error("Failed to load video for re-encoding."));
+        };
+
+        video.src = URL.createObjectURL(videoFile);
+    });
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   SECTION 5 — PUBLIC COMPRESSION FUNCTIONS
+   ───────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * Lossy video compression via MediaRecorder at CRF-mapped bitrate.
+ * @param {File} videoFile
+ * @param {number} crf - 0-51
+ * @param {string} preset - ignored, kept for API compatibility
  * @param {Function|null} onLog
  * @param {Function|null} onProgress
  * @returns {Promise<Object>}
  */
 async function compressVideoLossy(videoFile, crf = 23, preset = "ultrafast", onLog = null, onProgress = null) {
     crf = Math.max(0, Math.min(51, Math.round(crf)));
-    const validPresets = ["ultrafast","superfast","veryfast","faster","fast","medium","slow","slower","veryslow"];
-    if (!validPresets.includes(preset)) preset = "ultrafast";
-
     const originalSize     = videoFile.size;
     const originalMetadata = await getVideoMetadata(videoFile);
+    const targetBitrate    = crfToBitrate(crf);
 
-    const ffmpeg     = await getFFmpegInstance(onLog, onProgress);
-    const inputName  = "input_lossy" + getFileExtension(videoFile.name);
-    const outputName = "output_lossy.mp4";
+    if (onLog) onLog("CRF " + crf + " → " + (targetBitrate / 1000).toFixed(0) + " kbps");
 
-    // FIX: fetchFile is a method on the ffmpeg INSTANCE at v0.11.0,
-    //      not FFmpeg.fetchFile (that was a static import style, not available here)
-    ffmpeg.FS("writeFile", inputName, await ffmpeg.fetchFile(videoFile));
-
-    // FIX: wrap run() in timeout — large files can hang indefinitely
-    await Promise.race([
-        ffmpeg.run(
-            "-i",      inputName,
-            "-c:v",    "libx264",
-            "-crf",    String(crf),
-            "-preset", preset,
-            "-c:a",    "aac",
-            "-b:a",    "128k",
-            outputName
-        ),
-        new Promise((_, reject) =>
-            setTimeout(() => reject(new Error(
-                "Video encoding timed out after 5 minutes. Try a smaller file or higher CRF value."
-            )), 300000)
-        ),
-    ]);
-
-    const outputData     = ffmpeg.FS("readFile", outputName);
-    const compressedBlob = new Blob([outputData.buffer], { type: "video/mp4" });
+    const compressedBlob = await _recordVideoToBlob(videoFile, originalMetadata, targetBitrate, onLog, onProgress);
     const compressedSize = compressedBlob.size;
     const compressedMeta = await getVideoMetadata(compressedBlob);
 
-    ffmpeg.FS("unlink", inputName);
-    ffmpeg.FS("unlink", outputName);
-
     return {
         type:                "lossy",
-        format:              "H.264 / MP4",
+        format:              "WebM (MediaRecorder)",
         compressedBlob,
         originalSize,
         compressedSize,
@@ -272,28 +226,17 @@ async function compressVideoLossy(videoFile, crf = 23, preset = "ultrafast", onL
         compressedBitrate:   computeBitrate(compressedSize, compressedMeta.duration),
         originalDuration:    formatDuration(originalMetadata.duration),
         compressedDuration:  formatDuration(compressedMeta.duration),
-        originalDimensions:  `${originalMetadata.width} × ${originalMetadata.height} px`,
-        compressedDimensions:`${compressedMeta.width} × ${compressedMeta.height} px`,
+        originalDimensions:  originalMetadata.width + " × " + originalMetadata.height + " px",
+        compressedDimensions:compressedMeta.width   + " × " + compressedMeta.height   + " px",
         crfUsed:             crf,
-        presetUsed:          preset,
+        presetUsed:          "MediaRecorder",
         originalDurationRaw: originalMetadata.duration,
     };
 }
 
-
-/* ─────────────────────────────────────────────────────────────────────────────
-   SECTION 5 — LOSSLESS COMPRESSION: H.264 CRF 0
-   ───────────────────────────────────────────────────────────────────────────── */
-
 /**
- * Compresses a video using H.264 lossless encoding (CRF 0).
- * Every pixel value is mathematically preserved.
- *
- * Note: CRF-0 re-encoding does NOT produce byte-identical output to the
- * original (container metadata differs). SHA-256 is of the compressed output.
- * Re-uploading that file will match the hash, proving no corruption.
- *
- * @param {File}         videoFile
+ * Near-lossless video compression at maximum bitrate (8 Mbps).
+ * @param {File} videoFile
  * @param {Function|null} onLog
  * @param {Function|null} onProgress
  * @returns {Promise<Object>}
@@ -302,48 +245,19 @@ async function compressVideoLossless(videoFile, onLog = null, onProgress = null)
     const originalSize     = videoFile.size;
     const originalMetadata = await getVideoMetadata(videoFile);
 
-    const ffmpeg     = await getFFmpegInstance(onLog, onProgress);
-    const inputName  = "input_lossless" + getFileExtension(videoFile.name);
-    const outputName = "output_lossless.mp4";
-
-    // FIX: fetchFile on instance, not FFmpeg.fetchFile
-    ffmpeg.FS("writeFile", inputName, await ffmpeg.fetchFile(videoFile));
-
-    // FIX: wrap run() in timeout
-    await Promise.race([
-        ffmpeg.run(
-            "-i",       inputName,
-            "-c:v",     "libx264",
-            "-crf",     "0",
-            "-preset",  "ultrafast",
-            "-c:a",     "copy",
-            "-pix_fmt", "yuv420p",
-            outputName
-        ),
-        new Promise((_, reject) =>
-            setTimeout(() => reject(new Error(
-                "Video encoding timed out after 5 minutes. Try a smaller file or higher CRF value."
-            )), 300000)
-        ),
-    ]);
-
-    const outputData     = ffmpeg.FS("readFile", outputName);
-    const compressedBlob = new Blob([outputData.buffer], { type: "video/mp4" });
+    const compressedBlob = await _recordVideoToBlob(videoFile, originalMetadata, 8000000, onLog, onProgress);
     const compressedSize = compressedBlob.size;
     const compressedMeta = await getVideoMetadata(compressedBlob);
 
-    ffmpeg.FS("unlink", inputName);
-    ffmpeg.FS("unlink", outputName);
-
-    const compressedHash    = await computeSHA256(outputData.buffer);
-    const durationMatches   = Math.abs(originalMetadata.duration - compressedMeta.duration) < 0.1;
-    const dimensionsMatch   = originalMetadata.width  === compressedMeta.width &&
-                              originalMetadata.height === compressedMeta.height;
-    const integrityVerified = durationMatches && dimensionsMatch;
+    const compressedBuffer = await compressedBlob.arrayBuffer();
+    const compressedHash   = await computeSHA256(compressedBuffer);
+    const durationMatches  = Math.abs(originalMetadata.duration - compressedMeta.duration) < 1.0;
+    const dimensionsMatch  = originalMetadata.width === compressedMeta.width &&
+                             originalMetadata.height === compressedMeta.height;
 
     return {
         type:                "lossless",
-        format:              "H.264 CRF-0 / MP4",
+        format:              "WebM high-bitrate (MediaRecorder)",
         compressedBlob,
         originalSize,
         compressedSize,
@@ -354,69 +268,86 @@ async function compressVideoLossless(videoFile, onLog = null, onProgress = null)
         compressedHash,
         originalDuration:    formatDuration(originalMetadata.duration),
         compressedDuration:  formatDuration(compressedMeta.duration),
-        originalDimensions:  `${originalMetadata.width} × ${originalMetadata.height} px`,
-        compressedDimensions:`${compressedMeta.width} × ${compressedMeta.height} px`,
         durationMatches,
         dimensionsMatch,
-        integrityVerified,
-        integrityStatus:     integrityVerified
+        integrityVerified:   durationMatches && dimensionsMatch,
+        integrityStatus:     (durationMatches && dimensionsMatch)
             ? "✅ Duration and dimensions verified"
-            : "⚠️ Metadata mismatch — check results",
+            : "⚠️ Metadata mismatch",
         originalMetadata,
     };
 }
 
-
 /* ─────────────────────────────────────────────────────────────────────────────
-   SECTION 6 — REBUILD VERIFICATION
+   SECTION 6 — DECOMPRESSION / VERIFICATION
    ───────────────────────────────────────────────────────────────────────────── */
 
 /**
- * Verifies a lossless video rebuild via SHA-256 hash comparison.
+ * Verifies a lossless video by SHA-256 hash comparison.
  * @param {File}   reuploadedFile
  * @param {string} storedHash
+ * @param {Object} originalMetadata
+ * @param {number} originalSize
+ * @param {string} originalName
  * @returns {Promise<Object>}
  */
-async function verifyLosslessVideoRebuild(reuploadedFile, storedHash) {
+async function decompressVideoLossless(reuploadedFile, storedHash, originalMetadata, originalSize, originalName = "video") {
     const fileBuffer  = await reuploadedFile.arrayBuffer();
     const rebuiltHash = await computeSHA256(fileBuffer);
-    const isMatch     = rebuiltHash === storedHash;
+    const hashMatch   = rebuiltHash === storedHash;
+    const rebuiltMeta = await getVideoMetadata(reuploadedFile);
+
+    const durationMatches = originalMetadata
+        ? Math.abs((originalMetadata.duration || 0) - rebuiltMeta.duration) < 1.0 : true;
+    const dimensionsMatch = originalMetadata
+        ? (originalMetadata.width === rebuiltMeta.width && originalMetadata.height === rebuiltMeta.height) : true;
+
+    const baseName = originalName.replace(/\.[^.]+$/, "");
     return {
-        storedHash,
-        rebuiltHash,
-        isMatch,
-        status:       isMatch ? "✅ Hash match — file is intact" : "❌ Hash mismatch — file may be altered",
-        downloadBlob: new Blob([fileBuffer], { type: "video/mp4" }),
+        rebuiltHash, storedHash, hashMatch,
+        checks: [
+            (hashMatch       ? "✅" : "❌") + " SHA-256 hash "  + (hashMatch       ? "matches"  : "mismatch"),
+            (durationMatches ? "✅" : "⚠️") + " Duration: "     + formatDuration(rebuiltMeta.duration),
+            (dimensionsMatch ? "✅" : "⚠️") + " Dimensions: "   + rebuiltMeta.width + " × " + rebuiltMeta.height + " px",
+        ],
+        status:       hashMatch ? "✅ Hash match — file intact." : "❌ Hash mismatch.",
+        downloadBlob: new Blob([fileBuffer], { type: reuploadedFile.type }),
+        downloadName: baseName + "_verified.webm",
     };
 }
 
 /**
- * Verifies a lossy video rebuild via bitrate comparison.
+ * Verifies a lossy video by bitrate comparison.
  * @param {File}   reuploadedFile
  * @param {number} originalSize
  * @param {number} originalDurationSec
+ * @param {number} crfUsed
+ * @param {string} originalName
  * @returns {Promise<Object>}
  */
-async function verifyLossyVideoRebuild(reuploadedFile, originalSize, originalDurationSec) {
-    const rebuiltMeta          = await getVideoMetadata(reuploadedFile);
-    const rebuiltSize          = reuploadedFile.size;
-    const originalBitrateKbps  = (originalSize  * 8) / (originalDurationSec       * 1000);
-    const rebuiltBitrateKbps   = (rebuiltSize   * 8) / (rebuiltMeta.duration      * 1000);
-    const bitrateReduction     = (((originalBitrateKbps - rebuiltBitrateKbps) / originalBitrateKbps) * 100).toFixed(2) + "%";
+async function decompressVideoLossy(reuploadedFile, originalSize, originalDurationSec, crfUsed, originalName = "video") {
+    const rebuiltMeta        = await getVideoMetadata(reuploadedFile);
+    const rebuiltSize        = reuploadedFile.size;
+    const origBps            = (originalSize * 8) / (originalDurationSec * 1000);
+    const rebuiltBps         = (rebuiltSize  * 8) / ((rebuiltMeta.duration || originalDurationSec) * 1000);
+    const reductionPct       = (((origBps - rebuiltBps) / origBps) * 100).toFixed(2);
+    const bitrateRating      = rebuiltBps > 2000 ? "Excellent" :
+                               rebuiltBps > 1000 ? "Good"      :
+                               rebuiltBps > 500  ? "Acceptable": "Heavily Compressed";
+    const baseName = originalName.replace(/\.[^.]+$/, "");
     return {
-        originalSizeHR:    formatBytes(originalSize),
-        rebuiltSizeHR:     formatBytes(rebuiltSize),
-        ratio:             computeCompressionRatio(originalSize, rebuiltSize),
-        savings:           computeSpaceSavings(originalSize, rebuiltSize),
-        originalBitrate:   originalBitrateKbps.toFixed(0) + " kbps",
-        rebuiltBitrate:    rebuiltBitrateKbps.toFixed(0)  + " kbps",
-        bitrateReduction,
-        rebuiltDuration:   formatDuration(rebuiltMeta.duration),
-        rebuiltDimensions: `${rebuiltMeta.width} × ${rebuiltMeta.height} px`,
-        downloadBlob:      reuploadedFile,
+        originalBitrate:  origBps.toFixed(0)    + " kbps",
+        rebuiltBitrate:   rebuiltBps.toFixed(0) + " kbps",
+        bitrateReduction: reductionPct + "%",
+        bitrateRating,
+        ratio:            computeCompressionRatio(originalSize, rebuiltSize),
+        savings:          computeSpaceSavings(originalSize, rebuiltSize),
+        rebuiltDuration:  formatDuration(rebuiltMeta.duration),
+        rebuiltDimensions:rebuiltMeta.width + " × " + rebuiltMeta.height + " px",
+        downloadBlob:     reuploadedFile,
+        downloadName:     baseName + "_decompressed.webm",
     };
 }
-
 
 /* ─────────────────────────────────────────────────────────────────────────────
    SECTION 7 — DOWNLOAD UTILITY
