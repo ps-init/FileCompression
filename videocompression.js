@@ -204,7 +204,9 @@ async function compressVideoLossy(videoFile, crf = 23, preset = "ultrafast", onL
     crf = Math.max(0, Math.min(51, Math.round(crf)));
     const originalSize     = videoFile.size;
     const originalMetadata = await getVideoMetadata(videoFile);
-    const targetBitrate    = crfToBitrate(crf);
+    // Cap bitrate so output is always smaller than original
+const originalBitrate = (originalSize * 8) / originalMetadata.duration;
+const targetBitrate   = Math.min(crfToBitrate(crf), Math.round(originalBitrate * 0.9));
 
     if (onLog) onLog("CRF " + crf + " → " + (targetBitrate / 1000).toFixed(0) + " kbps");
 
