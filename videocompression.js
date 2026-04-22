@@ -1,22 +1,94 @@
 /**
- * videoCompression.js
+ * videocompression.js
  *
- * Two compression paths:
- *   LOSSLESS (CRF 0): pako GZIP on raw video bytes — true lossless, perfect rebuild.
- *   LOSSY  (CRF > 0): MediaRecorder canvas re-encode at CRF-mapped bitrate — no ffmpeg needed.
+ * Video compression for the MACS JC Project 2 Chrome Extension.
  *
- * No SharedArrayBuffer, no ffmpeg.wasm, no external libraries beyond pako (already loaded).
- * PDF references: Section 4.4, 6.1, 6.2, 6.3, 6.4
+ * ─── NO FFMPEG — zero new libraries ───────────────────────────────────────
+ *
+ * LOSSY  (CRF 1–51): Uses the browser-native MediaRecorder API + VP9 codec.
+ *   - Built into Chrome, no installation needed.
+ *   - Maps CRF value to a target video bitrate (kbps).
+ *   - Output: .webm container with VP9 video + Opus audio.
+ *
+ * LOSSLESS (CRF 0): Uses pako GZIP (already loaded globally via CDN).
+ *   - Wraps the original .mp4 in a GZIP archive (.mp4.gz).
+ *   - SHA-256 of the original is stored and verified on rebuild.
+ *   - Output: .mp4.gz archive, decompressed back to original .mp4.
+ *
+ * Dependencies:
+ *   - pako    (global, already loaded via CDN in index.html)
+ *   - No other libraries needed.
+ *
+ * Exports (global functions called by popup.js):
+ *   compressVideoLossy(file, crf, preset, onLog, onProgress)
+ *   compressVideoLossless(file, onLog, onProgress)
  */
 
 "use strict";
 
 /* ─────────────────────────────────────────────────────────────────────────────
-   SECTION 1 — VIDEO METADATA
+   SECTION 1 — SHARED UTILITIES
    ───────────────────────────────────────────────────────────────────────────── */
 
 /**
- * Reads duration, width, height from a video file via HTML5 video element.
+ * Returns a human-readable file size string.
+ * @param {number} bytes
+ * @returns {string}  e.g. "4.20 MB"
+ */
+function videoFormatBytes(bytes) {
+    if (bytes < 1024)       return bytes + " B";
+    if (bytes < 1048576)    return (bytes / 1024).toFixed(2) + " KB";
+    if (bytes < 1073741824) return (bytes / 1048576).toFixed(2) + " MB";
+    return (bytes / 1073741824).toFixed(2) + " GB";
+}
+
+/**
+ * Compression ratio: originalSize / compressedSize  (PDF §6.1)
+ * @param {number} original
+ * @param {number} compressed
+ * @returns {string}  e.g. "2.87:1"
+ */
+function videoCompressionRatio(original, compressed) {
+    if (compressed === 0) return "∞:1";
+    return (original / compressed).toFixed(2) + ":1";
+}
+
+/**
+ * Space savings percentage  (PDF §6.2)
+ * @param {number} original
+ * @param {number} compressed
+ * @returns {string}  e.g. "65.15%"
+ */
+function videoSpaceSavings(original, compressed) {
+    return (((original - compressed) / original) * 100).toFixed(2) + "%";
+}
+
+/**
+ * Video bitrate in kbps — quality metric for lossy compression  (PDF §6.3)
+ * Formula: (fileSizeBytes × 8) / (durationSeconds × 1000)
+ * @param {number} bytes
+ * @param {number} durationSec
+ * @returns {string}  e.g. "1280 kbps"
+ */
+function videoComputeBitrate(bytes, durationSec) {
+    if (!durationSec || durationSec <= 0) return "N/A";
+    return Math.round((bytes * 8) / (durationSec * 1000)) + " kbps";
+}
+
+/**
+ * SHA-256 hash via SubtleCrypto — no external library needed  (PDF §6.4)
+ * @param {ArrayBuffer} buffer
+ * @returns {Promise<string>}  lowercase hex string
+ */
+async function videoComputeSHA256(buffer) {
+    const hashBuffer = await crypto.subtle.digest("SHA-256", buffer);
+    return Array.from(new Uint8Array(hashBuffer))
+                .map(b => b.toString(16).padStart(2, "0"))
+                .join("");
+}
+
+/**
+ * Reads video duration, width, and height via the HTML5 video element.
  * @param {File|Blob} videoFile
  * @returns {Promise<{duration: number, width: number, height: number}>}
  */
@@ -26,297 +98,378 @@ function getVideoMetadata(videoFile) {
         video.preload = "metadata";
         video.muted   = true;
         const url     = URL.createObjectURL(videoFile);
-        video.onloadedmetadata = () => {
-            URL.revokeObjectURL(url);
-            resolve({ duration: video.duration, width: video.videoWidth, height: video.videoHeight });
-        };
-        video.onerror = () => { URL.revokeObjectURL(url); reject(new Error("Could not read video metadata.")); };
-        video.src = url;
-    });
-}
 
-/* ─────────────────────────────────────────────────────────────────────────────
-   SECTION 2 — CRF TO BITRATE MAPPING (for lossy path)
-   ───────────────────────────────────────────────────────────────────────────── */
-
-/**
- * Converts CRF (1–51) to a target bitrate in bps using exponential curve.
- * @param {number} crf
- * @returns {number} bps
- */
-function crfToBitrate(crf) {
-    const MAX_BPS = 8000000;
-    const MIN_BPS =  200000;
-    const t = Math.max(1, crf) / 51;
-    return Math.round(MAX_BPS * Math.pow(MIN_BPS / MAX_BPS, t));
-}
-
-/* ─────────────────────────────────────────────────────────────────────────────
-   SECTION 3 — METRICS
-   ───────────────────────────────────────────────────────────────────────────── */
-
-function computeCompressionRatio(o, c) { return c === 0 ? "∞:1" : (o / c).toFixed(2) + ":1"; }
-function computeSpaceSavings(o, c)     { return (((o - c) / o) * 100).toFixed(2) + "%"; }
-function computeBitrate(bytes, dur)    { return (!dur || dur <= 0) ? "N/A" : ((bytes * 8) / (dur * 1000)).toFixed(0) + " kbps"; }
-
-async function computeSHA256(buffer) {
-    const h = await crypto.subtle.digest("SHA-256", buffer);
-    return Array.from(new Uint8Array(h)).map(b => b.toString(16).padStart(2, "0")).join("");
-}
-function formatBytes(b) {
-    if (b < 1024) return b + " B";
-    if (b < 1048576) return (b / 1024).toFixed(2) + " KB";
-    if (b < 1073741824) return (b / 1048576).toFixed(2) + " MB";
-    return (b / 1073741824).toFixed(2) + " GB";
-}
-function formatDuration(s) {
-    if (!isFinite(s)) return "Unknown";
-    const m = Math.floor(s / 60), ss = Math.floor(s % 60);
-    return m > 0 ? `${m}m ${ss}s` : `${ss}s`;
-}
-function getFileExtension(filename) {
-    const m = filename.match(/\.[^.]+$/);
-    return m ? m[0].toLowerCase() : ".mp4";
-}
-
-/* ─────────────────────────────────────────────────────────────────────────────
-   SECTION 4 — LOSSLESS COMPRESSION (GZIP raw bytes)
-   ─────────────────────────────────────────────────────────────────────────────
-   The original video bytes are GZIPped with pako.
-   Decompression recovers the exact original file — byte-for-byte identical.
-   SHA-256 of the ORIGINAL is stored for verification.  (PDF §6.4)
-   ───────────────────────────────────────────────────────────────────────────── */
-
-/**
- * Losslessly compresses a video by GZIPping its raw bytes via pako.
- * Decompression recovers the original file perfectly.
- *
- * @param {File}          videoFile
- * @param {Function|null} onLog
- * @param {Function|null} onProgress
- * @returns {Promise<Object>}
- */
-async function compressVideoLossless(videoFile, onLog = null, onProgress = null) {
-    if (typeof pako === "undefined") throw new Error("pako is not loaded.");
-
-    const buffer       = await videoFile.arrayBuffer();
-    const originalSize = videoFile.size;
-    const originalHash = await computeSHA256(buffer);   // hash of ORIGINAL for rebuild check
-    const originalMetadata = await getVideoMetadata(videoFile);
-
-    if (onLog) onLog("GZIP compressing " + formatBytes(originalSize) + "...");
-    if (onProgress) onProgress(0.1);
-
-    const compressed     = pako.gzip(new Uint8Array(buffer), { level: 6 });
-    const compressedBlob = new Blob([compressed], { type: "application/gzip" });
-    const compressedSize = compressedBlob.size;
-
-    if (onProgress) onProgress(1);
-    if (onLog) onLog("Lossless GZIP complete: " + formatBytes(compressedSize));
-
-    return {
-        type:             "lossless",
-        format:           "GZIP (pako)",
-        compressedBlob,
-        originalSize,
-        compressedSize,
-        originalSizeHR:   formatBytes(originalSize),
-        compressedSizeHR: formatBytes(compressedSize),
-        ratio:            computeCompressionRatio(originalSize, compressedSize),
-        savings:          computeSpaceSavings(originalSize, compressedSize),
-        compressedHash:   originalHash,   // SHA-256 of ORIGINAL for decompression verification
-        originalMetadata,
-        originalDuration: formatDuration(originalMetadata.duration),
-    };
-}
-
-/* ─────────────────────────────────────────────────────────────────────────────
-   SECTION 5 — LOSSY COMPRESSION (MediaRecorder canvas re-encode)
-   ─────────────────────────────────────────────────────────────────────────────
-   Video frames are drawn to a canvas and re-recorded via MediaRecorder at
-   a lower bitrate. Audio is also captured and included in the WebM output.
-   No ffmpeg.wasm, no SharedArrayBuffer needed.  (PDF §4.4, §6.3)
-   ───────────────────────────────────────────────────────────────────────────── */
-
-/**
- * Lossy video compression via MediaRecorder at a CRF-mapped bitrate.
- * Output is WebM (VP9/VP8 + Opus audio).
- *
- * @param {File}          videoFile
- * @param {number}        crf       - 1–51 (0 is lossless path, handled separately)
- * @param {string}        preset    - ignored, kept for API compatibility
- * @param {Function|null} onLog
- * @param {Function|null} onProgress
- * @returns {Promise<Object>}
- */
-async function compressVideoLossy(videoFile, crf = 23, preset = "ultrafast", onLog = null, onProgress = null) {
-    crf = Math.max(1, Math.min(51, Math.round(crf)));
-
-    const originalSize     = videoFile.size;
-    const originalMetadata = await getVideoMetadata(videoFile);
-
-    // Cap bitrate so compressed output is always smaller than original
-    const originalBitrateRaw = (originalSize * 8) / (originalMetadata.duration || 1);
-    const targetBitrate      = Math.min(crfToBitrate(crf), Math.round(originalBitrateRaw * 0.85));
-
-    if (onLog) onLog("CRF " + crf + " → target " + (targetBitrate / 1000).toFixed(0) + " kbps");
-
-    const compressedBlob = await _recordVideoToBlob(videoFile, originalMetadata, targetBitrate, onLog, onProgress);
-    const compressedSize = compressedBlob.size;
-    const compressedMeta = await getVideoMetadata(compressedBlob);
-
-    return {
-        type:                "lossy",
-        format:              "WebM (MediaRecorder)",
-        compressedBlob,
-        originalSize,
-        compressedSize,
-        originalSizeHR:      formatBytes(originalSize),
-        compressedSizeHR:    formatBytes(compressedSize),
-        ratio:               computeCompressionRatio(originalSize, compressedSize),
-        savings:             computeSpaceSavings(originalSize, compressedSize),
-        originalBitrate:     computeBitrate(originalSize, originalMetadata.duration),
-        compressedBitrate:   computeBitrate(compressedSize, compressedMeta.duration),
-        originalDuration:    formatDuration(originalMetadata.duration),
-        compressedDuration:  formatDuration(compressedMeta.duration),
-        originalDimensions:  originalMetadata.width + " × " + originalMetadata.height + " px",
-        compressedDimensions:compressedMeta.width   + " × " + compressedMeta.height   + " px",
-        crfUsed:             crf,
-        presetUsed:          "MediaRecorder",
-        originalDurationRaw: originalMetadata.duration,
-    };
-}
-
-/* ─────────────────────────────────────────────────────────────────────────────
-   SECTION 6 — MEDIARECORDER CORE (with audio capture)
-   ───────────────────────────────────────────────────────────────────────────── */
-
-/**
- * Plays a video onto a canvas and records it via MediaRecorder.
- * Audio tracks from the video element are captured and included in output.
- *
- * @param {File}          videoFile
- * @param {{duration, width, height}} meta
- * @param {number}        targetBitrate - bps
- * @param {Function|null} onLog
- * @param {Function|null} onProgress
- * @returns {Promise<Blob>}
- */
-function _recordVideoToBlob(videoFile, meta, targetBitrate, onLog, onProgress) {
-    return new Promise((resolve, reject) => {
-        const video         = document.createElement("video");
-        video.muted         = true;   // mute PLAYBACK (no speakers), audio still captured via stream
-        video.style.display = "none";
-        document.body.appendChild(video);
-
-        const canvas  = document.createElement("canvas");
-        canvas.width  = meta.width  || 640;
-        canvas.height = meta.height || 360;
-        const ctx     = canvas.getContext("2d");
-
-        // Pick best supported codec with audio (Opus)
-        const mimeType =
-            MediaRecorder.isTypeSupported("video/webm;codecs=vp9,opus") ? "video/webm;codecs=vp9,opus" :
-            MediaRecorder.isTypeSupported("video/webm;codecs=vp8,opus") ? "video/webm;codecs=vp8,opus" :
-            "video/webm";
-
-        let recorder = null;
-        const chunks = [];
-        let rafId;
-
-        const cleanup = () => {
-            cancelAnimationFrame(rafId);
-            if (document.body.contains(video)) document.body.removeChild(video);
-        };
-
+        // 10s timeout — handles cases where browser silently ignores unsupported format
         const timeout = setTimeout(() => {
-            cleanup();
-            try { if (recorder) recorder.stop(); } catch (_) {}
-            reject(new Error("Video compression timed out after 10 minutes."));
-        }, 600000);
+            URL.revokeObjectURL(url);
+            reject(new Error(
+                "Could not read metadata for \"" + videoFile.name + "\" (timed out). " +
+                "Supported formats: MP4 (H.264), WebM. Try re-encoding as MP4."
+            ));
+        }, 10000);
 
         video.onloadedmetadata = () => {
-            // Build combined stream: canvas (video) + video element (audio)
-            const canvasStream   = canvas.captureStream(30);
-            const combinedStream = new MediaStream();
-
-            // Add video track from canvas
-            canvasStream.getVideoTracks().forEach(t => combinedStream.addTrack(t));
-
-            // Add audio track from video element (muted = playback only, stream still has audio)
-            try {
-                const vs = video.captureStream ? video.captureStream() :
-                           video.mozCaptureStream ? video.mozCaptureStream() : null;
-                if (vs) vs.getAudioTracks().forEach(t => { try { combinedStream.addTrack(t); } catch (_) {} });
-            } catch (e) {
-                if (onLog) onLog("Audio capture unavailable: " + e.message);
+            clearTimeout(timeout);
+            URL.revokeObjectURL(url);
+            if (!video.videoWidth || !video.videoHeight) {
+                reject(new Error(
+                    "\"" + videoFile.name + "\" has no video track. " +
+                    "It may be audio-only or corrupted."
+                ));
+                return;
             }
-
-            recorder = new MediaRecorder(combinedStream, {
-                mimeType,
-                videoBitsPerSecond: targetBitrate,
+            resolve({
+                duration: video.duration,
+                width:    video.videoWidth,
+                height:   video.videoHeight,
             });
-
-            recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
-
-            recorder.onstop = () => {
-                clearTimeout(timeout);
-                cleanup();
-                resolve(new Blob(chunks, { type: mimeType }));
-            };
-
-            recorder.onerror = (e) => {
-                clearTimeout(timeout);
-                cleanup();
-                reject(new Error("MediaRecorder error: " + (e.error || e)));
-            };
-
-            recorder.start(100);
-            video.play().catch(reject);
-            if (onLog) onLog("Recording started at " + (targetBitrate / 1000).toFixed(0) + " kbps (audio+video)...");
-        };
-
-        const drawFrame = () => {
-            if (video.paused || video.ended) return;
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-            if (onProgress && meta.duration > 0) onProgress(video.currentTime / meta.duration);
-            rafId = requestAnimationFrame(drawFrame);
-        };
-        video.onplay = drawFrame;
-
-        video.onended = () => {
-            cancelAnimationFrame(rafId);
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-            setTimeout(() => { try { if (recorder) recorder.stop(); } catch (_) {} }, 300);
-            if (onLog) onLog("Recording complete.");
         };
 
         video.onerror = () => {
             clearTimeout(timeout);
-            cleanup();
-            reject(new Error("Failed to load video for re-encoding."));
+            URL.revokeObjectURL(url);
+            reject(new Error(
+                "Browser cannot decode \"" + videoFile.name + "\". " +
+                "Supported formats: MP4 (H.264), WebM. " +
+                "Try converting to MP4 first."
+            ));
         };
 
-        video.src = URL.createObjectURL(videoFile);
+        video.src = url;
     });
 }
 
+/**
+ * Maps a CRF value (H.264 scale 0–51) to a target bitrate in bits/sec.
+ * Each 6 CRF units approximately halves the bitrate (same as x264 behaviour).
+ *
+ * CRF 18 → ~3 Mbps   (near-transparent)
+ * CRF 24 → ~1.5 Mbps (good quality, default)
+ * CRF 30 → ~750 kbps (medium)
+ * CRF 36 → ~375 kbps (low)
+ * CRF 42 → ~188 kbps (very low)
+ *
+ * @param {number} crf  1–51 (0 is routed to lossless, not here)
+ * @returns {number}  bits per second
+ */
+function crfToBitrate(crf) {
+    const bps = Math.round(3000000 / Math.pow(2, (crf - 18) / 6));
+    // Clamp: minimum 150 kbps, maximum 8 Mbps
+    return Math.min(8000000, Math.max(150000, bps));
+}
+
+/**
+ * Returns the best supported VP9/VP8 MIME type for MediaRecorder,
+ * or a generic "video/webm" fallback.
+ * @returns {string}
+ */
+function getBestMimeType() {
+    const candidates = [
+        "video/webm;codecs=vp9,opus",
+        "video/webm;codecs=vp9",
+        "video/webm;codecs=vp8,opus",
+        "video/webm;codecs=vp8",
+        "video/webm",
+    ];
+    for (const type of candidates) {
+        if (MediaRecorder.isTypeSupported(type)) return type;
+    }
+    return "video/webm";
+}
+
+
 /* ─────────────────────────────────────────────────────────────────────────────
-   SECTION 7 — DOWNLOAD UTILITY
+   SECTION 2 — LOSSY COMPRESSION: MediaRecorder + VP9
    ───────────────────────────────────────────────────────────────────────────── */
 
 /**
- * Triggers a browser file download for a Blob.
- * @param {Blob}   blob
- * @param {string} filename
+ * Compresses a video file using the browser-native MediaRecorder API.
+ * Encodes to WebM/VP9 at a bitrate derived from the CRF value.
+ *
+ * How it works:
+ *   1. Loads the video into a hidden <video> element.
+ *   2. Captures the playback stream via video.captureStream().
+ *   3. MediaRecorder re-encodes the stream at the target bitrate.
+ *   4. Collects encoded chunks and assembles them into a .webm Blob.
+ *
+ * IMPORTANT: The video plays in real-time during encoding.
+ * Keep the extension popup open until the progress reaches 100%.
+ * For testing, use short clips (the PDF recommends 30 seconds).
+ *
+ * @param {File}          videoFile   — Source .mp4 (or .mov, .webm, etc.)
+ * @param {number}        crf         — Quality (1–51). Default 23.
+ * @param {string}        preset      — Ignored (MediaRecorder has no presets)
+ * @param {Function|null} onLog       — Optional log callback(message)
+ * @param {Function|null} onProgress  — Optional progress callback(0–1)
+ *
+ * @returns {Promise<{
+ *   type:                string,
+ *   format:              string,
+ *   compressedBlob:      Blob,
+ *   originalSize:        number,
+ *   compressedSize:      number,
+ *   originalSizeHR:      string,
+ *   compressedSizeHR:    string,
+ *   ratio:               string,
+ *   savings:             string,
+ *   originalBitrate:     string,
+ *   compressedBitrate:   string,
+ *   originalDuration:    string,
+ *   compressedDuration:  string,
+ *   originalDimensions:  string,
+ *   compressedDimensions:string,
+ *   crfUsed:             number,
+ *   originalDurationRaw: number,
+ * }>}
  */
-function downloadBlob(blob, filename) {
-    const url    = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href     = url;
-    anchor.download = filename;
-    document.body.appendChild(anchor);
-    anchor.click();
-    document.body.removeChild(anchor);
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+function compressVideoLossy(videoFile, crf = 23, preset = "medium", onLog = null, onProgress = null) {
+
+    return new Promise(async (resolve, reject) => {
+
+        // Guard: MediaRecorder must be available (it is in all modern Chrome)
+        if (typeof MediaRecorder === "undefined") {
+            return reject(new Error(
+                "MediaRecorder API is not available in this browser. " +
+                "Please use Chrome 94 or later."
+            ));
+        }
+
+        const originalSize    = videoFile.size;
+        let   originalMetadata;
+
+        try {
+            originalMetadata = await getVideoMetadata(videoFile);
+        } catch (err) {
+            return reject(err);
+        }
+
+        const { duration, width, height } = originalMetadata;
+
+        if (onLog) onLog("Source: " + width + "×" + height + ", " + duration.toFixed(1) + "s");
+
+        // Map CRF → target bitrate
+        const targetBps  = crfToBitrate(crf);
+        const mimeType   = getBestMimeType();
+
+        if (onLog) onLog("Encoding to " + mimeType + " at " + Math.round(targetBps / 1000) + " kbps");
+
+        // ── Create hidden video element ─────────────────────────────────
+        const videoEl   = document.createElement("video");
+        videoEl.muted   = false;    // keep audio in the stream
+        videoEl.preload = "auto";
+        videoEl.style.cssText = "position:fixed;left:-9999px;top:-9999px;width:1px;height:1px;";
+        document.body.appendChild(videoEl);
+
+        const objectUrl = URL.createObjectURL(videoFile);
+        videoEl.src     = objectUrl;
+
+        videoEl.onerror = () => {
+            cleanup();
+            reject(new Error(
+                "Failed to load video for encoding. " +
+                "Try a different .mp4 file. " +
+                "(Error code: " + (videoEl.error ? videoEl.error.code : "unknown") + ")"
+            ));
+        };
+
+        videoEl.onloadeddata = () => {
+
+            // ── Capture the video/audio stream ──────────────────────────
+            let stream;
+            try {
+                stream = videoEl.captureStream();
+            } catch (err) {
+                cleanup();
+                return reject(new Error(
+                    "captureStream() failed: " + err.message + ". " +
+                    "This may happen if the video codec is not supported by Chrome."
+                ));
+            }
+
+            // ── Set up MediaRecorder ─────────────────────────────────────
+            let recorder;
+            try {
+                recorder = new MediaRecorder(stream, {
+                    mimeType,
+                    videoBitsPerSecond: targetBps,
+                    audioBitsPerSecond: 128000,
+                });
+            } catch (err) {
+                cleanup();
+                return reject(new Error(
+                    "MediaRecorder setup failed: " + err.message
+                ));
+            }
+
+            const chunks = [];
+
+            recorder.ondataavailable = (e) => {
+                if (e.data && e.data.size > 0) chunks.push(e.data);
+            };
+
+            recorder.onstop = async () => {
+                cleanup();
+
+                const compressedBlob = new Blob(chunks, { type: mimeType });
+                const compressedSize = compressedBlob.size;
+
+                // Get metadata of compressed output for dimension/duration check
+                let compressedMeta = { duration, width, height }; // fallback
+                try {
+                    compressedMeta = await getVideoMetadata(compressedBlob);
+                } catch (_) { /* non-critical */ }
+
+                if (onLog) {
+                    onLog(
+                        "Done. " +
+                        videoFormatBytes(originalSize) + " → " +
+                        videoFormatBytes(compressedSize)
+                    );
+                }
+
+                resolve({
+                    type:                "lossy",
+                    format:              "VP9 / WebM (MediaRecorder)",
+                    compressedBlob,
+                    originalSize,
+                    compressedSize,
+                    originalSizeHR:      videoFormatBytes(originalSize),
+                    compressedSizeHR:    videoFormatBytes(compressedSize),
+                    ratio:               videoCompressionRatio(originalSize, compressedSize),
+                    savings:             videoSpaceSavings(originalSize, compressedSize),
+                    originalBitrate:     videoComputeBitrate(originalSize, duration),
+                    compressedBitrate:   videoComputeBitrate(compressedSize, compressedMeta.duration || duration),
+                    originalDuration:    duration.toFixed(1) + "s",
+                    compressedDuration:  (compressedMeta.duration || duration).toFixed(1) + "s",
+                    originalDimensions:  width + " × " + height + " px",
+                    compressedDimensions:compressedMeta.width + " × " + compressedMeta.height + " px",
+                    crfUsed:             crf,
+                    originalDurationRaw: duration,
+                });
+            };
+
+            recorder.onerror = (e) => {
+                cleanup();
+                reject(new Error("MediaRecorder error during encoding: " + (e.error ? e.error.message : "unknown")));
+            };
+
+            // ── Track progress via video currentTime ─────────────────────
+            videoEl.ontimeupdate = () => {
+                if (duration > 0 && onProgress) {
+                    onProgress(videoEl.currentTime / duration);
+                }
+            };
+
+            // ── Stop recorder when video ends ────────────────────────────
+            videoEl.onended = () => {
+                if (recorder.state !== "inactive") recorder.stop();
+            };
+
+            // ── Start encoding ───────────────────────────────────────────
+            recorder.start(500); // collect data every 500ms
+            videoEl.play().catch((err) => {
+                cleanup();
+                reject(new Error("Video playback failed: " + err.message));
+            });
+        };
+
+        // ── Cleanup helper: remove hidden video element and free URL ────
+        function cleanup() {
+            URL.revokeObjectURL(objectUrl);
+            if (videoEl.parentNode) document.body.removeChild(videoEl);
+        }
+    });
+}
+
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   SECTION 3 — LOSSLESS COMPRESSION: GZIP via pako
+   ───────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * Compresses a video file losslessly by wrapping it in a GZIP archive.
+ * Uses pako (already loaded globally via CDN — no new library needed).
+ *
+ * Every byte of the original .mp4 is preserved. SHA-256 of the original
+ * is stored so decompressVideoLossless() can confirm a perfect rebuild.
+ *
+ * Space savings on MP4 are modest (5–25%) because H.264-encoded video
+ * data already has low entropy. This is documented in PDF §4.4.
+ *
+ * @param {File}          videoFile
+ * @param {Function|null} onLog
+ * @param {Function|null} onProgress
+ *
+ * @returns {Promise<{
+ *   type:                string,
+ *   format:              string,
+ *   compressedBlob:      Blob,
+ *   compressedHash:      string,   SHA-256 of the ORIGINAL — used for rebuild verification
+ *   originalSize:        number,
+ *   compressedSize:      number,
+ *   originalSizeHR:      string,
+ *   compressedSizeHR:    string,
+ *   ratio:               string,
+ *   savings:             string,
+ *   originalMetadata:    {duration, width, height},
+ *   integrityStatus:     string,
+ * }>}
+ */
+async function compressVideoLossless(videoFile, onLog = null, onProgress = null) {
+
+    // Guard: pako must be loaded
+    if (typeof pako === "undefined") {
+        throw new Error(
+            "pako is not loaded. Ensure pako.min.js is included before videocompression.js."
+        );
+    }
+
+    if (onLog) onLog("Reading video file…");
+
+    const originalBuffer  = await videoFile.arrayBuffer();
+    const originalSize    = videoFile.size;
+
+    if (onProgress) onProgress(0.1);
+
+    // Get metadata for the result object (popup.js stores it in session)
+    const originalMetadata = await getVideoMetadata(videoFile);
+
+    if (onLog) onLog("Computing SHA-256 of original…");
+    if (onProgress) onProgress(0.2);
+
+    // Compute SHA-256 of the ORIGINAL file — verified on decompression
+    const originalHash = await videoComputeSHA256(originalBuffer);
+
+    if (onLog) onLog("Compressing with GZIP (pako)…");
+    if (onProgress) onProgress(0.3);
+
+    // GZIP compress at level 6 (good balance of speed vs size)
+    const inputBytes       = new Uint8Array(originalBuffer);
+    const compressedBytes  = pako.gzip(inputBytes, { level: 6 });
+    const compressedBlob   = new Blob([compressedBytes], { type: "application/gzip" });
+    const compressedSize   = compressedBlob.size;
+
+    if (onProgress) onProgress(1.0);
+    if (onLog) {
+        onLog(
+            "Done. " +
+            videoFormatBytes(originalSize) + " → " +
+            videoFormatBytes(compressedSize)
+        );
+    }
+
+    return {
+        type:                "lossless",
+        format:              "GZIP / pako (lossless)",
+        compressedBlob,
+        compressedHash:      originalHash,   // SHA-256 of ORIGINAL for rebuild check
+        originalSize,
+        compressedSize,
+        originalSizeHR:      videoFormatBytes(originalSize),
+        compressedSizeHR:    videoFormatBytes(compressedSize),
+        ratio:               videoCompressionRatio(originalSize, compressedSize),
+        savings:             videoSpaceSavings(originalSize, compressedSize),
+        originalMetadata,
+        integrityStatus:     "✅ SHA-256 stored — verify rebuild by re-uploading the .mp4.gz",
+    };
 }
