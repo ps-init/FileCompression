@@ -69,13 +69,44 @@ function detectFileCategory(file) {
  * @param {File}   file
  * @param {Object} options - { jpegQuality, videoCrf, videoPreset }
  */
+// File size limits per type (bytes)
+const FILE_SIZE_LIMITS = {
+    "image-jpeg": 50  * 1024 * 1024,   // 50 MB
+    "image-png":  50  * 1024 * 1024,   // 50 MB
+    "text":       10  * 1024 * 1024,   // 10 MB
+    "audio":      100 * 1024 * 1024,   // 100 MB
+    "video":      500 * 1024 * 1024,   // 500 MB
+};
+
+const FILE_SIZE_LABELS = {
+    "image-jpeg": "50 MB", "image-png": "50 MB",
+    "text": "10 MB", "audio": "100 MB", "video": "500 MB",
+};
+
 async function handleCompress(file, options = {}) {
     compressionSession = null;
     hideError();
 
+    // Check 1: Unsupported file type
     const category = detectFileCategory(file);
     if (!category) {
         showError("Unsupported file type: " + file.name + ". Supported: .txt .csv .png .jpg .jpeg .wav .mp3 .mp4");
+        return;
+    }
+
+    // Check 2: File too large
+    const sizeLimit = FILE_SIZE_LIMITS[category];
+    if (file.size > sizeLimit) {
+        showError(
+            "File too large: " + formatBytes(file.size) + ". " +
+            "Maximum allowed for " + category + " is " + FILE_SIZE_LABELS[category] + "."
+        );
+        return;
+    }
+
+    // Check 3: Empty file
+    if (file.size === 0) {
+        showError("File is empty: " + file.name + ". Please select a valid file.");
         return;
     }
 
