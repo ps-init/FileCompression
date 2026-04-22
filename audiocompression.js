@@ -149,10 +149,14 @@ async function compressAudio(file) {
     const extension    = file.name.split(".").pop().toLowerCase();
     const isWav        = extension === "wav";
     const isMp3        = extension === "mp3";
+    const isOgg        = extension === "ogg";
+    const isAac        = extension === "aac";
+    const isFlac       = extension === "flac";
 
-    if (!isWav && !isMp3) {
+    const supportedAudio = ["wav", "mp3", "ogg", "aac", "flac"];
+    if (!supportedAudio.includes(extension)) {
         throw new Error(
-            `Unsupported audio format ".${extension}". Only .wav and .mp3 files are supported.`
+            `Unsupported audio format ".${extension}". Supported: .wav .mp3 .ogg .aac .flac`
         );
     }
 
@@ -180,14 +184,14 @@ async function compressAudio(file) {
     let bitrateOriginal = "N/A";
     let bitrateGzipped  = "N/A";
 
-    if (isMp3) {
+    if (!isWav && !isFlac) {  // lossy formats: MP3, OGG, AAC
         const durationSec   = await audioGetDuration(file);
         bitrateOriginal     = audioComputeBitrate(originalSize, durationSec);
         bitrateGzipped      = audioComputeBitrate(compressedSize, durationSec);
     }
 
     return {
-        type:             isWav ? "lossless" : "lossy",
+        type:             (isWav || isFlac) ? "lossless" : "lossy",
         originalSize,
         originalSizeHR:   audioFormatBytes(originalSize),
         compressedSizeHR: audioFormatBytes(compressedSize),

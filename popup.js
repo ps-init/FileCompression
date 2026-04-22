@@ -53,7 +53,7 @@ function detectFileCategory(file) {
     if (type === "image/png"  || name.endsWith(".png"))                           return "image-png";
     if (type.startsWith("video/") || [".mp4",".mov",".avi",".mkv",".webm"].some(e => name.endsWith(e))) return "video";
     if (type === "text/plain" || type === "text/csv" || name.endsWith(".txt") || name.endsWith(".csv")) return "text";
-    if (type.startsWith("audio/") || name.endsWith(".mp3") || name.endsWith(".wav")) return "audio";
+    if (type.startsWith("audio/") || [".mp3",".wav",".ogg",".aac",".flac"].some(e => name.endsWith(e))) return "audio";
     return null;
 }
 
