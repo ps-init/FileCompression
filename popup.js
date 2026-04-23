@@ -246,13 +246,36 @@ async function handleDecompress(file) {
 
             case "image-png": {
                 result = await decompressPNG(file, s.storedHash, s.originalName);
-                displayDecompressionResult({ type: "PNG — Lossless Rebuild", isLossless: true, hashCheck: { stored: s.storedHash, rebuilt: result.rebuiltHash, match: result.isMatch }, status: result.status, fileSizeHR: result.fileSizeHR, downloadBlob: result.downloadBlob, downloadName: result.downloadName });
+                displayDecompressionResult({
+                    type:             "PNG — DEFLATE Decompressed to Raw Pixel Data",
+                    isLossless:       true,
+                    hashCheck:        { stored: s.storedHash, rebuilt: result.rebuiltHash, match: result.isMatch },
+                    status:           result.status,
+                    compressedSize:   result.compressedSizeHR,
+                    decompressedSize: result.decompressedSizeHR,
+                    dimensions:       result.width + " × " + result.height + " px (" + result.totalPixels.toLocaleString() + " pixels)",
+                    fileSizeHR:       result.fileSizeHR,
+                    downloadBlob:     result.downloadBlob,
+                    downloadName:     result.downloadName,
+                });
                 break;
             }
 
             case "image-jpeg": {
                 result = await decompressJPEG(file, s.originalPixels, s.originalSize, s.originalWidth, s.originalHeight, s.originalName);
-                displayDecompressionResult({ type: "JPEG — Lossy Quality Verification", isLossless: false, qualityMetrics: { psnr: result.psnr, ssim: result.ssim, psnrRating: result.psnrRating }, originalSize: result.originalSizeHR, compressedSize: result.compressedSizeHR, ratio: result.ratio, savings: result.savings, downloadBlob: result.downloadBlob, downloadName: result.downloadName });
+                displayDecompressionResult({
+                    type:             "JPEG — DCT Decompressed to Raw Pixel Data (PNG)",
+                    isLossless:       false,
+                    qualityMetrics:   { psnr: result.psnr, ssim: result.ssim, psnrRating: result.psnrRating },
+                    originalSize:     result.originalSizeHR,
+                    compressedSize:   result.compressedSizeHR,
+                    decompressedSize: result.decompressedSizeHR,
+                    dimensions:       result.width + " × " + result.height + " px (" + result.totalPixels.toLocaleString() + " pixels)",
+                    ratio:            result.ratio,
+                    savings:          result.savings,
+                    downloadBlob:     result.downloadBlob,
+                    downloadName:     result.downloadName,
+                });
                 break;
             }
 
@@ -377,8 +400,21 @@ function displayDecompressionResult(data) {
         html += `<div class="quality-metrics">
                     <p><strong>PSNR:</strong> ${data.qualityMetrics.psnr} — ${data.qualityMetrics.psnrRating}</p>
                     <p><strong>SSIM:</strong> ${data.qualityMetrics.ssim}</p>
-                    <p><strong>Original:</strong> ${data.originalSize} &nbsp;→&nbsp; <strong>Compressed:</strong> ${data.compressedSize}</p>
-                    <p><strong>Ratio:</strong> ${data.ratio} &nbsp;|&nbsp; <strong>Saved:</strong> ${data.savings}</p>
+                    ${data.dimensions ? `<p><strong>Dimensions:</strong> ${data.dimensions}</p>` : ""}
+                    <hr style="border:none;border-top:1px solid #bbf7d0;margin:6px 0;">
+                    <p><strong>📷 Original size:</strong> ${data.originalSize}</p>
+                    <p><strong>📦 Compressed (JPEG):</strong> ${data.compressedSize} &nbsp;<span style="color:#dc2626;">↓ ${data.savings} smaller</span></p>
+                    <p><strong>📂 Decompressed (raw PNG pixels):</strong> ${data.decompressedSize || "—"} &nbsp;<span style="color:#16a34a;font-weight:700;">↑ full pixel data restored</span></p>
+                    <p><strong>Compression Ratio:</strong> ${data.ratio}</p>
+                 </div>`;
+    }
+
+    // Size comparison for lossless (shows compressed → decompressed size increase)
+    if (data.isLossless && data.decompressedSize) {
+        html += `<div class="quality-metrics">
+                    ${data.dimensions ? `<p><strong>Dimensions:</strong> ${data.dimensions}</p>` : ""}
+                    <p><strong>📦 Compressed:</strong> ${data.compressedSize || data.fileSizeHR || "—"}</p>
+                    <p><strong>📂 Decompressed (raw pixels):</strong> ${data.decompressedSize} &nbsp;<span style="color:#16a34a;font-weight:700;">↑ larger — full pixel data restored</span></p>
                  </div>`;
     }
 
