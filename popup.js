@@ -247,7 +247,7 @@ async function handleDecompress(file) {
             case "image-png": {
                 result = await decompressPNG(file, s.storedHash, s.originalName);
                 displayDecompressionResult({
-                    type:             "PNG — DEFLATE Decompressed to Raw Pixel Data",
+                    type:             "PNG — Lossless Rebuild (DEFLATE Verified)",
                     isLossless:       true,
                     hashCheck:        { stored: s.storedHash, rebuilt: result.rebuiltHash, match: result.isMatch },
                     status:           result.status,
@@ -264,7 +264,7 @@ async function handleDecompress(file) {
             case "image-jpeg": {
                 result = await decompressJPEG(file, s.originalPixels, s.originalSize, s.originalWidth, s.originalHeight, s.originalName);
                 displayDecompressionResult({
-                    type:             "JPEG — DCT Decompressed to Raw Pixel Data (PNG)",
+                    type:             "JPEG — Quality Verification (PSNR/SSIM)",
                     isLossless:       false,
                     qualityMetrics:   { psnr: result.psnr, ssim: result.ssim, psnrRating: result.psnrRating },
                     originalSize:     result.originalSizeHR,
@@ -273,6 +273,7 @@ async function handleDecompress(file) {
                     dimensions:       result.width + " × " + result.height + " px (" + result.totalPixels.toLocaleString() + " pixels)",
                     ratio:            result.ratio,
                     savings:          result.savings,
+                    residualInfo:     result.residualInfo,
                     downloadBlob:     result.downloadBlob,
                     downloadName:     result.downloadName,
                 });
@@ -415,6 +416,16 @@ function displayDecompressionResult(data) {
                     ${data.dimensions ? `<p><strong>Dimensions:</strong> ${data.dimensions}</p>` : ""}
                     <p><strong>📦 Compressed:</strong> ${data.compressedSize || data.fileSizeHR || "—"}</p>
                     <p><strong>📂 Decompressed (raw pixels):</strong> ${data.decompressedSize} &nbsp;<span style="color:#16a34a;font-weight:700;">↑ larger — full pixel data restored</span></p>
+                 </div>`;
+    }
+
+    // Residual/delta info (lossy images)
+    if (data.residualInfo) {
+        html += `<div class="quality-metrics" style="background:#fff8f0;border-color:#fed7aa;">
+                    <p><strong>🔬 Residual Analysis (data lost in compression):</strong></p>
+                    <p><strong>Max pixel delta:</strong> ${data.residualInfo.maxDelta}</p>
+                    <p><strong>Avg pixel delta:</strong> ${data.residualInfo.avgDelta}</p>
+                    <p><strong>Affected pixels:</strong> ${data.residualInfo.affectedPixels}</p>
                  </div>`;
     }
 
