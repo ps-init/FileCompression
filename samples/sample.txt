@@ -1,0 +1,97 @@
+File Compression — Sample Text File
+MACS JC Project 2 | Team Submission
+
+Introduction to File Compression
+==================================
+File compression is the process of reducing the size of one or more files
+so that they occupy less storage space and can be transferred more quickly
+over a network.
+
+How Compression Works
+======================
+Compression works by identifying and eliminating redundancy in data.
+Every file — whether text, image, audio, or video — contains patterns,
+repetitions, or statistically predictable sequences that compression
+algorithms exploit to represent the same information in a more compact form.
+
+Types of Compression
+=====================
+
+1. LOSSLESS COMPRESSION
+   - No data is lost during compression
+   - The original file can be perfectly reconstructed
+   - Used for: text files, PNG images, ZIP archives
+   - Examples: GZIP, DEFLATE, LZ77, Huffman coding
+   - Compression ratio: typically 2:1 to 5:1
+
+2. LOSSY COMPRESSION
+   - Some data is permanently discarded
+   - Achieves much higher compression ratios
+   - Used for: JPEG images, MP3 audio, MP4 video
+   - Examples: DCT, Wavelet Transform, Perceptual coding
+   - Compression ratio: can exceed 20:1
+
+Key Metrics
+============
+- Compression Ratio  = Original Size / Compressed Size
+- Space Savings (%)  = (Original - Compressed) / Original x 100
+- PSNR (dB)         = Quality metric for lossy compression (>40 dB = excellent)
+- SSIM              = Structural similarity index (1.0 = perfect match)
+- SHA-256           = Hash used to verify lossless rebuild integrity
+
+Run-Length Encoding Example
+============================
+Original : AAAAAABBBCCDDDDDD = 17 characters
+Encoded  : 6A 3B 2C 6D       =  8 characters
+Savings  : 52.9%
+
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
+CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD
+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
+
+The above repeated characters demonstrate how GZIP achieves high
+compression ratios on text files — repeated patterns are replaced
+with short back-references, dramatically reducing file size.
+
+Lorem Ipsum (for compression testing)
+=======================================
+Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod
+tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam,
+quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo
+consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse
+cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat
+non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
+
+Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod
+tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam,
+quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo
+consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse
+cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat
+non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
+
+Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod
+tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam,
+quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo
+consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse
+cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat
+non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
+
+Algorithm Comparison
+=====================
+Algorithm    | Type     | Ratio  | Speed  | Use Case
+-------------|----------|--------|--------|------------------
+GZIP         | Lossless | 2-5:1  | Fast   | Text, Web
+BZIP2        | Lossless | 3-6:1  | Medium | Archives
+DEFLATE      | Lossless | 2-4:1  | Fast   | PNG, ZIP
+JPEG         | Lossy    | 10-20:1| Fast   | Photos
+H.264        | Lossy    | 50-100:1| Slow  | Video streaming
+MP3          | Lossy    | 10-12:1| Fast   | Audio
+
+End of Sample File
+===================
+This file was created for MACS JC Project 2 — File Compression.
+Testing compression on this file should yield approximately 60-70%
+space savings due to the high repetition and natural language patterns.
