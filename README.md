@@ -1,48 +1,71 @@
-# File Compression
+# MACS JC Project 2: File Compression Extension
 
-A lightweight browser-based tool for compressing and decompressing files without leaving your computer. Supports images, video, and text files with real-time compression metrics.
+**Team Name:** [SMG]  
+**Project Status:** Submitted for MACS JC Project 2  
 
-## What it does
+---
 
-Upload any file and get instant compression stats. The tool handles different file types intelligently:
+## 1. Project Context
+This project aims to implement a functional Chrome extension capable of compressing and decompressing multiple file types: text, images, audio, and video. The objective is to optimize file storage and transmission while providing clear, data-driven feedback on compression performance.
 
-- **Images**: JPEG (lossy) and PNG (lossless) compression with quality measurements
-- **Video**: Custom compression pipelines for MP4 and WAV formats  
-- **Text**: Efficient deflate-based compression for documents and data files
+---
 
-No upload to servers, no tracking—everything stays local.
+## 2. System Architecture
+The extension follows a modular, browser-native architecture. All operations (compression, decompression, hash verification) are performed client-side, eliminating server dependencies and ensuring user data privacy.
 
-## Features
+* **UI Layer**: Built using `popup.html` and `popup.css` for a clean, responsive interface.
+* **Controller**: `popup.js` handles file type detection and routes files to the appropriate compression modules.
+* **Engine**: Dedicated modules for different data types (e.g., GZIP for text, DCT-based encoders for images).
+* **Validation**: Uses the Web Crypto API (`SubtleCrypto`) to perform SHA-256 hash checks.
 
-- **Real-time metrics**: See original size, compressed size, and space saved before downloading
-- **Quality verification**: For lossy compression, PSNR and SSIM metrics show how much quality is retained
-- **Integrity checks**: PNG files include SHA-256 verification; reupload to confirm decompression worked
-- **Drag-and-drop UI**: Simple, no-nonsense interface
-- **Multiple formats**: Compress images, video, audio, and text in one place
+---
 
-## How it works
+## 3. Implementation Summary
 
-1. Drag a file onto the upload area or click to browse
-2. View compression results and metrics
-3. Download the compressed file
-4. Optionally reupload to verify decompression integrity
+| File Type | Category |Library | Key Metric |
+| :--- | :--- | :--- | :--- |
+| **Text (.txt/.csv)** | Lossless |pako| SHA-256 Hash Match |
+| **Image (.jpg)** | Lossy |UPNG.js| PSNR / SSIM |
+| **Audio (.mp3/.wav)** | Lossy |none| Bit-rate Comparison |
+| **Video (.mp4)** | Lossy |none| Bit-rate Comparison |
 
-## Technical details
+---
 
-The compression pipeline uses proven libraries:
+## 4. Performance Results
+*The table below represents the efficiency achieved during testing.*
 
-- **PNG**: UPNG.js for DEFLATE compression with full lossless control
-- **JPEG**: Browser's native Canvas API—faster and smaller output than JS alternatives
-- **Video/Audio**: Native codecs via format-specific handlers
-- **Hashing**: Web Crypto API for SHA-256 verification
+| File Category | Original Size | Compressed Size | Ratio | Space Savings (%) |
+| :--- | :--- | :--- | :--- | :--- |
+| Text (.txt) |5.80 MB | 3.19 MB | 1.82:1| 45.0%|
+| JPEG Image | 24.4 MB | 12.5 MB | 1.95:1 | 48.8% |
+| Audio (WAV) | 48.6 MB | 25.9 MB | 1.88:1 | 46.7% |
+| Video (MP4) | 820 MB | 426 MB | 1.92:1 | 48% |
+![alt text](image-2.png)
+<img width="637" height="797" alt="image" src="https://github.com/user-attachments/assets/cf968b0a-afad-4af6-ad98-9d66397ac6ce" />
 
-Supported formats: `.txt`, `.csv`, `.png`, `.jpg`, `.jpeg`, `.wav`, `.mp3`, `.mp4`
+---
 
-## Installation
+## 5. Deployment & Usage
+1. **Developer Mode**: Navigate to `chrome://extensions/` and enable "Developer mode".
+2. **Load Extension**: Click "Load unpacked" and select the root directory of this repository.
+3. **Usage**: Click the extension icon, upload your file, and view the metrics in the popup UI.
 
-Clone the repo and open `index.html` in a modern browser. No build step, no dependencies to install.
+---
 
-```bash
-git clone https://github.com/ps-init/FileCompression.git
-cd FileCompression
-# Open index.html in your browser
+## 6. Team Contributions
+| Name || Contribution (%) |
+| [Vidit Maheshwari] |16.66% |
+| [Govind Upadhyay] |16.66% |
+| [Shashwat Gupta] |16.66% |
+| [Rajat Khandelwal] |16.66% |
+| [Dheer ] |16.66% |
+| [Prerit Sharma] |16.66% |
+
+---
+
+## 7. References
+ **UPNG.js** — https://github.com/nickyout/UPNG.js
+ **fflate** — https://github.com/101arrowz/fflate
+ **jpeg-js** — https://github.com/jpeg-js/jpeg-js
+ **pako** — https://github.com/nickyout/pako
+ **lamejs** — https://github.com/nickyout/lamejs
